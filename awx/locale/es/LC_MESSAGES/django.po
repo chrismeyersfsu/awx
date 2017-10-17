@@ -13,7 +13,7 @@ msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2017-08-27 19:27+0000\n"
-"PO-Revision-Date: 2017-10-17 17:47+0000\n"
+"PO-Revision-Date: 2017-10-17 17:50+0000\n"
 "Last-Translator: cmeyersadmin <cmeyers@ansible.com>\n"
 "Language-Team: \n"
 "Language: es\n"
@@ -22,13 +22,11 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 "X-Generator: Pootle 2.8\n"
-"X-POOTLE-MTIME: 1508262425.048155\n"
+"X-POOTLE-MTIME: 1508262622.452498\n"
 
 #: awx/api/authentication.py:67
 msgid "Invalid token header. No credentials provided."
-msgstr ""
-"Cabecera token inválida. Credenciales no indicados. Unique string added by "
-"chris meyers."
+msgstr "Cabecera token inválida. Credenciales no indicados."
 
 #: awx/api/authentication.py:70
 msgid "Invalid token header. Token string should not contain spaces."
@@ -58,7 +56,7 @@ msgstr ""
 #: awx/api/conf.py:14 awx/api/conf.py:24 awx/api/conf.py:33 awx/sso/conf.py:85
 #: awx/sso/conf.py:96 awx/sso/conf.py:108 awx/sso/conf.py:123
 msgid "Authentication"
-msgstr "Autentificación"
+msgstr "Autentificación. Unique string added by chris meyers."
 
 #: awx/api/conf.py:22
 msgid "Maximum number of simultaneous logins"
