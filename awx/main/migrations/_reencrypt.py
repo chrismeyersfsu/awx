@@ -68,7 +68,7 @@ def _credentials(apps):
 
 def _unified_jobs(apps):
     UnifiedJob = apps.get_model('main', 'UnifiedJob')
-    for uj in UnifiedJob.objects.all():
+    for uj in UnifiedJob.objects.all().defer('result_stdout_text'):
         if uj.start_args is not None:
             if should_decrypt_field(uj.start_args):
                 uj.start_args = decrypt_field(uj, 'start_args')
