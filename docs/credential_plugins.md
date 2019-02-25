@@ -7,18 +7,14 @@ encryption cipher utilizing AES-256 in CBC mode alongside a SHA-256 HMAC and
 stored in the AWX database.
 
 Alternatively, AWX supports retrieving secret values from third-party secret
-management systems, such as HashiCorp Vault and Microsoft Azure Key Vault.
+management systems, such as HashiCorp Vault and Microsoft Azure Key Vault. The external secrets will be retrieved at runtime, each time, just before they are needed.
 
 Configuring Secret Lookups
 --------------------------
 
-When configuring AWX to pull a secret from a third party system, there are
-generally three steps:
+Below is a an example of instantiating an (1) AWX Machine Credential with a static username, `example-user`, (2) an externally sourced password via HashiCorp Vault Key/Value system which will populate the (3) password field on the Machine Credential.
 
-1.  Creating a credential that will _use_ the external secret.  For example,
-    you may wish to create a Machine credential with a username of
-    `example-user` which will pull its `password` value from a HashiCorp Vault
-    Key/Value installation.  In practite, however,
+1.  Create the Machine Credential with static username, `example-user`
 
     ```shell
     HTTP POST https://awx.example.org/api/v2/credentials/
@@ -47,7 +43,7 @@ generally three steps:
         }
     }
 
-3.  _Linking_ the `password` field for the Machine credential to the external
+3.  _Link_ the `password` field for the Machine credential to the external
     system by specifying the source (in this example, the HashiCorp credential)
     and metadata about the path (e.g., `/some/path/to/my/password/`).
 
