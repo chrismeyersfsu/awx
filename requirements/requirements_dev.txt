@@ -21,3 +21,4 @@ backports.tempfile  # support in unit tests for py32+ tempfile.TemporaryDirector
 mockldap
 sdb
 atomicwrites==1.1.5
+git+https://github.com/ansible/ansible-runner@master#egg=ansible_runner
