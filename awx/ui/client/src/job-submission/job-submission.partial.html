@@ -215,6 +215,14 @@
                             </select>
                         </div>
                     </div>
+                    <div class="form-group Form-formGroup Form-formGroup--singleColumn" ng-if="ask_scm_branch_on_launch">
+                        <label for="scm_branch">
+                            <span class="Form-inputLabel" translate>SCM Branch</span>
+                        </label>
+                        <div>
+                            <input type="text" ng-model="other_prompt_data.scm_branch" name="limit" class="form-control Form-textInput">
+                        </div>
+                    </div>
                     <div class="form-group Form-formGroup Form-formGroup--singleColumn" ng-if="ask_limit_on_launch">
                         <label for="limit">
                             <span class="Form-inputLabel" translate>Limit</span>

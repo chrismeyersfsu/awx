@@ -160,7 +160,7 @@ export default
 
                     // General catch-all for "other prompts" - used in this link function and to hide the Other Prompts tab when
                     // it should be hidden
-                    $scope.has_other_prompts = (data.ask_verbosity_on_launch || data.ask_job_type_on_launch || data.ask_limit_on_launch || data.ask_tags_on_launch || data.ask_skip_tags_on_launch || data.ask_variables_on_launch || data.ask_diff_mode_on_launch) ? true : false;
+                    $scope.has_other_prompts = (data.ask_verbosity_on_launch || data.ask_job_type_on_launch || data.ask_limit_on_launch || data.ask_tags_on_launch || data.ask_skip_tags_on_launch || data.ask_variables_on_launch || data.ask_diff_mode_on_launch || data.ask_scm_branch_on_launch) ? true : false;
                     $scope.password_needed = data.passwords_needed_to_start && data.passwords_needed_to_start.length > 0;
                     $scope.has_default_inventory = data.defaults && data.defaults.inventory && data.defaults.inventory.id;
                     $scope.has_default_credential = data.defaults && data.defaults.credential && data.defaults.credential.id;
@@ -222,6 +222,10 @@ export default
 
                     if($scope.ask_diff_mode_on_launch) {
                         $scope.other_prompt_data.diff_mode = (data.defaults && data.defaults.diff_mode) ? data.defaults.diff_mode : false;
+                    }
+
+                    if($scope.ask_scm_branch_on_launch) {
+                        $scope.other_prompt_data.scm_branch = (data.defaults && data.defaults.scm_branch) ? data.defaults.scm_branch : "";
                     }
 
                     if($scope.ask_variables_on_launch) {
