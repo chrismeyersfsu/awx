@@ -256,7 +256,7 @@ class TestExtraVarSanitation(TestJobExecution):
 
     def test_vars_unsafe_by_default(self, job, private_data_dir):
         job.created_by = User(pk=123, username='angry-spud')
-        job.inventory = Inventory(pk=123, name='example-inv') 
+        job.inventory = Inventory(pk=123, name='example-inv')
 
         task = tasks.RunJob()
         task.build_extra_vars_file(job, private_data_dir)
@@ -525,7 +525,10 @@ class TestGenericRun():
         with mock.patch('awx.main.tasks.settings.AWX_ANSIBLE_COLLECTIONS_PATHS', ['/AWX_COLLECTION_PATH']):
             with mock.patch('awx.main.tasks.settings.AWX_TASK_ENV', {'ANSIBLE_COLLECTIONS_PATHS': '/MY_COLLECTION1:/MY_COLLECTION2'}):
                 env = task.build_env(job, private_data_dir)
-        assert env['ANSIBLE_COLLECTIONS_PATHS'] == '/MY_COLLECTION1:/MY_COLLECTION2:/AWX_COLLECTION_PATH'
+        used_paths = env['ANSIBLE_COLLECTIONS_PATHS'].split(':')
+        assert used_paths[-1].endswith('/requirements_collections')
+        used_paths.pop()
+        assert used_paths == ['/MY_COLLECTION1', '/MY_COLLECTION2', '/AWX_COLLECTION_PATH']
 
     def test_valid_custom_virtualenv(self, patch_Job, private_data_dir):
         job = Job(project=Project(), inventory=Inventory())
