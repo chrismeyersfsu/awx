@@ -82,7 +82,8 @@ from rest_framework.exceptions import PermissionDenied
 __all__ = ['RunJob', 'RunSystemJob', 'RunProjectUpdate', 'RunInventoryUpdate',
            'RunAdHocCommand', 'handle_work_error', 'handle_work_success', 'apply_cluster_membership_policies',
            'update_inventory_computed_fields', 'update_host_smart_inventory_memberships',
-           'send_notifications', 'run_administrative_checks', 'purge_old_stdout_files']
+           'send_notifications', 'run_administrative_checks', 'purge_old_stdout_files',
+           'cleanup_process_isolation_dirs',]
 
 HIDDEN_PASSWORD = '**********'
 
@@ -370,6 +371,20 @@ def purge_old_stdout_files():
         if os.path.getctime(os.path.join(settings.JOBOUTPUT_ROOT,f)) < nowtime - settings.LOCAL_STDOUT_EXPIRE_TIME:
             os.unlink(os.path.join(settings.JOBOUTPUT_ROOT,f))
             logger.debug("Removing {}".format(os.path.join(settings.JOBOUTPUT_ROOT,f)))
+
+
+@task(queue=get_local_queuename)
+def cleanup_process_isolation_dirs():
+    for f in os.listdir(settings.AWX_PROOT_BASE_PATH):
+        if f.startswith('ansible_runner_pi'):
+            del_path = os.path.join(settings.AWX_PROOT_BASE_PATH, f)
+            cleanup_file_path = os.path.join(settings.AWX_PROOT_BASE_PATH, f, ".cleanup")
+            if os.path.exists(cleanup_file_path):
+                try:
+                    logger.info("Cleaning up process isolation directory {}".format(del_path))
+                    shutil.rmtree(del_path)
+                except Exception as e:
+                    logger.warn("Failed to cleanup process isolation directory {} err {}".format(del_path, e))
 
 
 @task(queue=get_local_queuename)
@@ -694,6 +709,7 @@ class BaseTask(object):
     abstract = True
     cleanup_paths = []
     proot_show_paths = []
+    status_handler_called = False
 
     def update_model(self, pk, _attempt=0, **updates):
         """Reload the model instance from the database and update the
@@ -1094,6 +1110,10 @@ class BaseTask(object):
         '''
         Ansible runner callback triggered on status transition
         '''
+
+        # Save the chosen isolation path to deal with runner bug
+        self.process_isolation_path_actual = runner_config.process_isolation_path_actual
+        self.status_handler_called = True
         if status_data['status'] == 'starting':
             job_env = dict(runner_config.env)
             '''
@@ -1141,6 +1161,10 @@ class BaseTask(object):
         self.safe_cred_env = {}
         private_data_dir = None
         isolated_manager_instance = None
+
+        # Save the chosen isolation path to deal with runner bug
+        self.process_isolation_path_actual = None
+        process_isolation_cleanup_failed_flag = False
 
         try:
             isolated = self.instance.is_isolated()
@@ -1266,7 +1290,39 @@ class BaseTask(object):
                 self.event_ct = len(isolated_manager_instance.handled_events)
             else:
                 self.dispatcher = CallbackQueueDispatcher()
-                res = ansible_runner.interface.run(**params)
+                try:
+                    res = ansible_runner.interface.run(**params)
+                except OSError as e:
+                    '''
+                    Handle a runner + process isolation interaction bug.
+                    Bubblewrap relies heavily on async umount to ensure cleanup if the
+                    controllering process were to exit unexpectedly. The resuly of relying
+                    on this mechanism is that we can't know *when* the bind mount is
+                    *actually* unmounted and is safe to clean up. Runner attempts to
+                    cleanup the dir after the child process exists but may fail. Tower
+                    must then periodically try and clean up the directory.
+
+                    This code lays down a file in the dir to indicate that tower is done
+                    with the directory and that tower may *attempt* to clean the dir up.
+                    '''
+                    if not self.should_use_proot(self.instance):
+                        '''
+                        No need to cleanup if process isolation is not being used
+                        '''
+                        raise
+                    if not self.status_handler_called:
+                        '''
+                        Dir cleanup happens *after* the status callback in runner.
+                        This is not the error we are looking for.
+                        '''
+                        raise
+                    if getattr(e, 'errno', 0) != 16:
+                        # This is not the error we are looking for.
+                        # We are looking for "Device or resource busy"
+                        raise
+                    process_isolation_cleanup_failed_flag = True
+                    logger.warn('{} Failed to clean up process isolation dir {}'.format(self.instance.log_format, self.process_isolation_path_actual))
+
                 status = res.status
                 rc = res.rc
 
@@ -1301,6 +1357,26 @@ class BaseTask(object):
             logger.exception('{} Final run hook errored.'.format(self.instance.log_format))
 
         self.instance.websocket_emit_status(status)
+
+        '''
+        Always try and create the cleanup flag. It may be that runner fails to cleanup
+        the process isolation dir for some other reason.
+        '''
+        if self.should_use_proot(self.instance) and self.process_isolation_path_actual:
+            try:
+                cleanup_file = os.path.join(self.process_isolation_path_actual, ".cleanup")
+                os.close(os.open(cleanup_file, os.O_CREAT))
+                logger.info("{} Created cleanup file {}".format(self.instance.log_format, cleanup_file))
+            except FileNotFoundError:
+                if process_isolation_cleanup_failed_flag:
+                    logger.warn('{} Isolated directory {} found to not exist while attempting to create .cleanup file. This is fine, as the end goal is to delete this directory, but it is unexpected.'.format(self.instance.log_format, self.process_isolation_path_actual))
+                else:
+                    logger.debug('{} Isolated directory {} does not exist. This is expected when runner cleans up gracefully.'.format(self.instance.log_format, self.process_isolation_path_actual))
+            except Exception as e:
+                logger.warn("{} Failed to cleanup process isolation dir".format(self.instance.log_format))
+        elif self.should_use_proot(self.instance) and not self.process_isolation_path_actual:
+            logger.warn('{} Tower can not know the process isolation path. Runner did not get far enough to convey the status of the job back to tower.'.format(self.instance.log_format))
+
         if status != 'successful':
             if status == 'canceled':
                 raise AwxTaskError.TaskCancel(self.instance, rc)

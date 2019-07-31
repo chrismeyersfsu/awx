@@ -467,6 +467,10 @@ CELERYBEAT_SCHEDULE = {
         'schedule': timedelta(seconds=20),
         'options': {'expires': 20}
     },
+    'cleanup_process_isolation_dirs': {
+        'task': 'awx.main.tasks.cleanup_process_isolation_dirs',
+        'schedule': timedelta(hours=1)
+    },
     # 'isolated_heartbeat': set up at the end of production.py and development.py
 }
 AWX_INCONSISTENT_TASK_INTERVAL = 60 * 3
