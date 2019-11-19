@@ -50,8 +50,21 @@ if "pytest" in sys.modules:
     }
 
 # Redis Sentinel configuration.
-BROKER_URL = "sentinel://sentinel:26379"
+BROKER_URL = "sentinel://{}:{};".format(os.environ.get('SENTINEL_HOST', 'sentinel'),
+                                       os.environ.get('SENTINEL_PORT', '26379'))
 BROKER_TRANSPORT_OPTIONS = {'master_name': 'mymaster'}
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "awx.main.channels.RedisSentinelChannelLayer",
+        "CONFIG": {
+            "sentinels": [(os.environ.get('SENTINEL_HOST', 'sentinel'),
+                       int(os.environ.get('SENTINEL_PORT', 26379))
+                      )],
+            "services": ['mymaster'],
+        },
+    },
+}
 
 
 # Absolute filesystem path to the directory to host projects (with playbooks).

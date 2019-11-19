@@ -59,7 +59,12 @@ services:
     #volumes:
     #  - "./redis/redis.conf:/usr/local/etc/redis/redis.conf"
   sentinel:
-    image: bitnami/redis-sentinel:latest
+    user: ${CURRENT_UID}
+    image: redis:latest
     container_name: tools_sentinel_1
+    command: "redis-server /usr/local/etc/redis/sentinel.conf --sentinel"
+    volumes:
+      - "./sentinel/sentinel.conf:/usr/local/etc/redis/sentinel.conf"
     ports:
       - "26379:26379"
+

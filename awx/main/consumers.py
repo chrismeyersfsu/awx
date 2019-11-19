@@ -78,14 +78,16 @@ class EventConsumer(JsonWebsocketConsumer):
 
 
 def emit_channel_notification(group, payload):
-    channel_layer = get_channel_layer()
     try:
-        async_to_sync(channel_layer.group_send)(
-            group,
-            {
-                "type": "internal.message",
-                "text": json.dumps(payload, cls=DjangoJSONEncoder)
-            },
-        )
+        payload = json.dumps(payload, cls=DjangoJSONEncoder)
     except ValueError:
         logger.error("Invalid payload emitting channel {} on topic: {}".format(group, payload))
+
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        group,
+        {
+            "type": "internal.message",
+            "text": payload
+        },
+    )
