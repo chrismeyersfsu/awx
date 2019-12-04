@@ -3,6 +3,9 @@ import logging
 import importlib
 import sys
 import traceback
+import os
+import stat
+import resource
 
 from kubernetes.config import kube_config
 
@@ -44,6 +47,22 @@ class TaskWorker(BaseWorker):
 
         return _call
 
+    def _get_valid_fds(self):
+        try:
+            max_fds = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        except Exception:
+            # This probably will not happen
+            return None
+
+        valid_fds = dict()
+        for i in range(max_fds):
+            try:
+                valid_fds[i] = os.fstat(i)
+            except OSError:
+                pass
+
+        return valid_fds
+
     def run_callable(self, body):
         '''
         Given some AMQP message, import the correct Python code and run it.
@@ -59,7 +78,25 @@ class TaskWorker(BaseWorker):
             _call = _call().run
         # don't print kwargs, they often contain launch-time secrets
         logger.debug('task {} starting {}(*{})'.format(uuid, task, args))
-        return _call(*args, **kwargs)
+        fds_before = self._get_valid_fds()
+        try:
+            res = _call(*args, **kwargs)
+        finally:
+            fds_after = self._get_valid_fds()
+            if fds_before is not None and fds_after is not None:
+                fds_diff = {k:v for k,v in fds_before.items() if k not in fds_after}
+                for fd, res in fds_diff.items():
+                    fd_type = 'N/A'
+                    if stat.S_ISFIFO(res.st_mode):
+                        fd_type = 'FIFO'
+                    elif stat.S_ISSOCK(res.st_mode):
+                        fd_type = 'SOCKET'
+                    elif stat.S_ISREG(res.st_mode):
+                        fd_type = 'FILE'
+                    elif stat.S_ISDIR(res.st_mode):
+                        fd_type = 'DIR'
+                    logger.warn("Task {}, failed to close file descriptor {} type {} node {}".format(task, fd, fd_type, res.st_ino))
+        return res
 
     def perform_work(self, body):
         '''
