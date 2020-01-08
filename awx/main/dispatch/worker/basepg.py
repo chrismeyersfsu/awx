@@ -6,6 +6,8 @@ import logging
 import signal
 import sys
 import json
+import psycopg2
+import re
 from uuid import UUID
 from queue import Empty as QueueEmpty
 
@@ -51,7 +53,7 @@ class AWXConsumerPG(object):
         self.worker = worker
         self.pool = pool
         # TODO, maybe get new connection and reconnect periodically
-        self.pubsub = PubSub(pg_connection.cursor().connection)
+        self.pubsub = None
         if pool is None:
             self.pool = WorkerPool()
         self.pool.init_workers(self.worker.work_loop)
@@ -104,12 +106,19 @@ class AWXConsumerPG(object):
         self.worker.on_start()
 
         logger.warn(f"Running worker {self.name} listening to queues {self.queues}")
-        self.pubsub = PubSub(pg_connection.cursor().connection)
-        for queue in self.queues:
-            self.pubsub.listen(queue)
-        for e in self.pubsub.events():
-            logger.warn(f"Processing task {e}")
-            self.process_task(json.loads(e.payload), e)
+
+        while True:
+            try:
+                self.pubsub = PubSub(pg_connection.cursor().connection)
+                for queue in self.queues:
+                    self.pubsub.listen(re.sub('[^0-9a-zA-Z]+', '_', queue))
+                for e in self.pubsub.events():
+                    self.process_task(json.loads(e.payload), e)
+            except psycopg2.InterfaceError:
+                logger.warn("Stale Postgres message bus connection, reconnecting")
+                for conn in db.connections.all():
+                    conn.close_if_unusable_or_obsolete()
+
 
     def stop(self, signum, frame):
         logger.warn('received {}, stopping'.format(signame(signum)))
