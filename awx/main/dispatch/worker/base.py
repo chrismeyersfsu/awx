@@ -7,6 +7,8 @@ import signal
 import sys
 import redis
 import json
+import re
+import psycopg2
 from uuid import UUID
 from queue import Empty as QueueEmpty
 
@@ -14,8 +16,11 @@ from django import db
 from kombu import Producer
 from kombu.mixins import ConsumerMixin
 from django.conf import settings
+from django.db import connection as pg_connection
 
 from awx.main.dispatch.pool import WorkerPool
+
+from pgpubsub import PubSub
 
 if 'run_callback_receiver' in sys.argv:
     logger = logging.getLogger('awx.main.commands.run_callback_receiver')
@@ -40,8 +45,7 @@ class WorkerSignalHandler:
         self.kill_now = True
 
 
-class AWXConsumer(object):
-
+class AWXConsumerBase(object):
     def __init__(self, name, connection, worker, queues=[], pool=None):
         self.should_stop = False
 
@@ -59,15 +63,11 @@ class AWXConsumer(object):
     def listening_on(self):
         return f'listening on {self.queues}'
 
-    '''
-    def control(self, body, message):
+    def control(self, body):
         logger.warn(body)
         control = body.get('control')
         if control in ('status', 'running'):
-            producer = Producer(
-                channel=self.connection,
-                routing_key=message.properties['reply_to']
-            )
+            reply_queue = body['reply_to']
             if control == 'status':
                 msg = '\n'.join([self.listening_on, self.pool.debug()])
             elif control == 'running':
@@ -75,21 +75,28 @@ class AWXConsumer(object):
                 for worker in self.pool.workers:
                     worker.calculate_managed_tasks()
                     msg.extend(worker.managed_tasks.keys())
-            producer.publish(msg)
+
+            conf = settings.DATABASES['default']
+            conn = psycopg2.connect(dbname=conf['NAME'],
+                                    host=conf['HOST'],
+                                    user=conf['USER'],
+                                    password=conf['PASSWORD'])
+            # Django connection.cursor().connection doesn't have autocommit=True on
+            conn.set_session(autocommit=True)
+            pubsub = PubSub(conn)
+            pubsub.notify(reply_queue, json.dumps(msg))
         elif control == 'reload':
             for worker in self.pool.workers:
                 worker.quit()
         else:
             logger.error('unrecognized control message: {}'.format(control))
-        message.ack()
-    '''
 
-    def process_task(self, body, message):
+    def process_task(self, body):
         if 'control' in body:
             try:
-                return self.control(body, message)
+                return self.control(body)
             except Exception:
-                logger.exception("Exception handling control message:")
+                logger.exception(f"Exception handling control message: {body}")
                 return
         if len(self.pool):
             if "uuid" in body and body['uuid']:
@@ -109,19 +116,45 @@ class AWXConsumer(object):
         signal.signal(signal.SIGTERM, self.stop)
         self.worker.on_start()
 
-        queue = redis.Redis.from_url(settings.BROKER_URL)
-        while True:
-            res = queue.blpop(self.queues)
-            res = json.loads(res[1])
-            self.process_task(res, res)
-            if self.should_stop:
-                return
+        # Child should implement other things here
 
     def stop(self, signum, frame):
         self.should_stop = True  # this makes the kombu mixin stop consuming
         logger.warn('received {}, stopping'.format(signame(signum)))
         self.worker.on_stop()
         raise SystemExit()
+
+
+class AWXConsumerRedis(AWXConsumerBase):
+    def run(self, *args, **kwargs):
+        super(AWXConsumerRedis, self).run(*args, **kwargs)
+
+        queue = redis.Redis.from_url(settings.BROKER_URL)
+        while True:
+            res = queue.blpop(self.queues)
+            res = json.loads(res[1])
+            self.process_task(res)
+            if self.should_stop:
+                return
+
+
+class AWXConsumerPG(AWXConsumerBase):
+    def run(self, *args, **kwargs):
+        super(AWXConsumerPG, self).run(*args, **kwargs)
+
+        logger.warn(f"Running worker {self.name} listening to queues {self.queues}")
+
+        while True:
+            try:
+                self.pubsub = PubSub(pg_connection.cursor().connection)
+                for queue in self.queues:
+                    self.pubsub.listen(re.sub('[^0-9a-zA-Z]+', '_', queue))
+                for e in self.pubsub.events():
+                    self.process_task(json.loads(e.payload))
+            except psycopg2.InterfaceError:
+                logger.warn("Stale Postgres message bus connection, reconnecting")
+                for conn in db.connections.all():
+                    conn.close_if_unusable_or_obsolete()
 
 
 class BaseWorker(object):

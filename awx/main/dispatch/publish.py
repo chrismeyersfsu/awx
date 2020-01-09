@@ -4,12 +4,11 @@ import sys
 import json
 import re
 from uuid import uuid4
-import psycopg2
 
 from django.conf import settings
 from django.db import connection
-from pgpubsub import PubSub
 
+from . import pg_bus_conn
 
 logger = logging.getLogger('awx.main.dispatch')
 
@@ -87,15 +86,8 @@ class task:
                 if callable(queue):
                     queue = queue()
                 if not settings.IS_TESTING(sys.argv):
-                    conf = settings.DATABASES['default']
-                    conn = psycopg2.connect(dbname=conf['NAME'],
-                                            host=conf['HOST'],
-                                            user=conf['USER'],
-                                            password=conf['PASSWORD'])
-                    # Django connection.cursor().connection doesn't have autocommit=True on
-                    conn.set_session(autocommit=True)
-                    pubsub = PubSub(conn)
-                    pubsub.notify(re.sub('[^0-9a-zA-Z]+', '_', queue), json.dumps(obj))
+                    with pg_bus_conn() as conn:
+                        conn.notify(re.sub('[^0-9a-zA-Z]+', '_', queue), json.dumps(obj))
                 return (obj, queue)
 
         # If the object we're wrapping *is* a class (e.g., RunJob), return
