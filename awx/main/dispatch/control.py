@@ -43,11 +43,12 @@ class Control(object):
         reply_queue = Control.generate_reply_queue_name()
         self.result = None
 
-        with pg_bus_conn as conn:
+        with pg_bus_conn() as conn:
             conn.listen(reply_queue)
-            conn.notify(self.queuename, json.dumps({'control': command, 'reply_to': reply_queue}))
+            conn.notify(self.queuename,
+                        json.dumps({'control': command, 'reply_to': reply_queue}))
 
-            for reply in pubsub.events(select_timeout=timeout, yield_timeouts=True):
+            for reply in conn.events(select_timeout=timeout, yield_timeouts=True):
                 if reply is None:
                     logger.error(f'{self.service} did not reply within {timeout}s')
                     raise RuntimeError("{self.service} did not reply within {timeout}s")
@@ -56,5 +57,5 @@ class Control(object):
         return json.loads(reply.payload)
 
     def control(self, msg, **kwargs):
-        with pg_bus_conn as conn:
+        with pg_bus_conn() as conn:
             conn.notify(self.queuename, json.dumps(msg))

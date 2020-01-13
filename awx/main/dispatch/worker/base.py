@@ -16,11 +16,9 @@ from django import db
 from kombu import Producer
 from kombu.mixins import ConsumerMixin
 from django.conf import settings
-from django.db import connection as pg_connection
 
 from awx.main.dispatch.pool import WorkerPool
-
-from pgpubsub import PubSub
+from awx.main.dispatch import pg_bus_conn
 
 if 'run_callback_receiver' in sys.argv:
     logger = logging.getLogger('awx.main.commands.run_callback_receiver')
@@ -76,15 +74,8 @@ class AWXConsumerBase(object):
                     worker.calculate_managed_tasks()
                     msg.extend(worker.managed_tasks.keys())
 
-            conf = settings.DATABASES['default']
-            conn = psycopg2.connect(dbname=conf['NAME'],
-                                    host=conf['HOST'],
-                                    user=conf['USER'],
-                                    password=conf['PASSWORD'])
-            # Django connection.cursor().connection doesn't have autocommit=True on
-            conn.set_session(autocommit=True)
-            pubsub = PubSub(conn)
-            pubsub.notify(reply_queue, json.dumps(msg))
+            with pg_bus_conn() as conn:
+                conn.notify(reply_queue, json.dumps(msg))
         elif control == 'reload':
             for worker in self.pool.workers:
                 worker.quit()
@@ -146,15 +137,14 @@ class AWXConsumerPG(AWXConsumerBase):
 
         while True:
             try:
-                self.pubsub = PubSub(pg_connection.cursor().connection)
-                for queue in self.queues:
-                    self.pubsub.listen(re.sub('[^0-9a-zA-Z]+', '_', queue))
-                for e in self.pubsub.events():
-                    self.process_task(json.loads(e.payload))
+                with pg_bus_conn() as conn:
+                    for queue in self.queues:
+                        conn.listen(queue)
+                    for e in conn.events():
+                        self.process_task(json.loads(e.payload))
             except psycopg2.InterfaceError:
                 logger.warn("Stale Postgres message bus connection, reconnecting")
-                for conn in db.connections.all():
-                    conn.close_if_unusable_or_obsolete()
+                continue
 
 
 class BaseWorker(object):

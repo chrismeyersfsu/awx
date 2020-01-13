@@ -87,7 +87,7 @@ class task:
                     queue = queue()
                 if not settings.IS_TESTING(sys.argv):
                     with pg_bus_conn() as conn:
-                        conn.notify(re.sub('[^0-9a-zA-Z]+', '_', queue), json.dumps(obj))
+                        conn.notify(queue, json.dumps(obj))
                 return (obj, queue)
 
         # If the object we're wrapping *is* a class (e.g., RunJob), return
