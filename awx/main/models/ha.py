@@ -51,8 +51,16 @@ class Instance(HasPolicyEditsMixin, BaseModel):
     """A model representing an AWX instance running against this database."""
     objects = InstanceManager()
 
+    def routable_hostname_default():
+        return settings.CLUSTER_HOST_ID
+
     uuid = models.CharField(max_length=40)
     hostname = models.CharField(max_length=250, unique=True)
+    routable_hostname = models.CharField(
+        max_length=250,
+        unique=True,
+        default=routable_hostname_default,
+    )
     created = models.DateTimeField(auto_now_add=True)
     modified = models.DateTimeField(auto_now=True)
     last_isolated_check = models.DateTimeField(
