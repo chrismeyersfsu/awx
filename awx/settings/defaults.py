@@ -1117,10 +1117,6 @@ LOGGING = {
             'handlers': ['console', 'file', 'tower_warnings'],
             'level': 'WARNING',
         },
-        'kombu': {
-            'handlers': ['console', 'file', 'tower_warnings'],
-            'level': 'WARNING',
-        },
         'rest_framework.request': {
             'handlers': ['console', 'file', 'tower_warnings'],
             'level': 'WARNING',
