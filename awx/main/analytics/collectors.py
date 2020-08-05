@@ -33,7 +33,7 @@ data _since_ the last report date - i.e., new data in the last 24 hours)
 
 @register('config', '1.1')
 def config(since):
-    license_info = get_license(show_key=False)
+    license_info = get_license()
     install_type = 'traditional'
     if os.environ.get('container') == 'oci':
         install_type = 'openshift'
