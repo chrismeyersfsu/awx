@@ -31,7 +31,7 @@ data _since_ the last report date - i.e., new data in the last 24 hours)
 '''
 
 
-@register('config', '1.1')
+@register('config', '1.2')
 def config(since):
     license_info = get_license()
     install_type = 'traditional'
