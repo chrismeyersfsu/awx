@@ -1,0 +1,1 @@
+git+https://github.com/candlepin/subscription-manager.git#egg=1.28.3
