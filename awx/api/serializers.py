@@ -29,6 +29,8 @@ from django.utils.encoding import force_text
 from django.utils.text import capfirst
 from django.utils.timezone import now
 from django.utils.functional import cached_property
+from django.db.models.functions import Length
+from django.db.models import Avg
 
 # Django REST Framework
 from rest_framework.exceptions import ValidationError, PermissionDenied
@@ -3013,6 +3015,8 @@ class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
 
     passwords_needed_to_start = serializers.ReadOnlyField()
     artifacts = serializers.SerializerMethodField()
+    event_rate = serializers.SerializerMethodField()
+    event_size_average = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
@@ -3020,6 +3024,7 @@ class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
             '*', 'job_template', 'passwords_needed_to_start', 'allow_simultaneous',
             'artifacts', 'scm_revision', 'instance_group', 'diff_mode', 'job_slice_number',
             'job_slice_count', 'webhook_service', 'webhook_credential', 'webhook_guid',
+            'event_rate', 'event_size_average',
         )
 
     def get_related(self, obj):
@@ -3054,6 +3059,17 @@ class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
         if obj:
             return obj.display_artifacts()
         return {}
+
+    def get_event_rate(self, obj):
+        if obj.finished and obj.started:
+            return obj.emitted_events / (obj.finished - obj.started).total_seconds()
+        else:
+            return 0
+
+    def get_event_size_average(self, obj):
+        if obj.finished:
+            averages = obj.job_events.annotate(event_size=Length('event_data'), stdout_size=Length('stdout')).aggregate(avg_event_size=Avg('event_size'), avg_stdout_size=Avg('stdout_size'))
+            return averages['avg_event_size']
 
     def to_representation(self, obj):
         ret = super(JobSerializer, self).to_representation(obj)
