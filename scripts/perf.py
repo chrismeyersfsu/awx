@@ -82,6 +82,7 @@ class Experiment():
 
     # Per-process function
     def run_experiment(self):
+        connection.close()
 
         self.loops = 0
 
