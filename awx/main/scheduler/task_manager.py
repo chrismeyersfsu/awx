@@ -33,7 +33,7 @@ from awx.main.models import (
     WorkflowJobTemplate
 )
 from awx.main.scheduler.dag_workflow import WorkflowDAG
-from awx.main.utils.pglock import advisory_lock
+from awx.main.utils.pglock import advisory_lock_waiter
 from awx.main.utils import get_type_for_model, task_manager_bulk_reschedule, schedule_task_manager
 from awx.main.signals import disable_activity_stream
 from awx.main.scheduler.dependency_graph import DependencyGraph
@@ -634,11 +634,8 @@ class TaskManager():
 
     def schedule(self):
         # Lock
-        with advisory_lock('task_manager_lock', wait=False) as acquired:
+        with advisory_lock_waiter('task_manager_lock'):
             with transaction.atomic():
-                if acquired is False:
-                    logger.debug("Not running scheduler, another task holds lock")
-                    return
                 logger.debug("Starting Scheduler")
                 with task_manager_bulk_reschedule():
                     self._schedule()

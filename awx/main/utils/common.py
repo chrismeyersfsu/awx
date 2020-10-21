@@ -787,11 +787,20 @@ def ignore_inventory_computed_fields():
         _inventory_updates.is_updating = previous_value
 
 
-def _schedule_task_manager():
+def _schedule_task_manager_if_no_waiter():
+    from awx.main.utils.pglock import advisory_lock_has_waiter
     from awx.main.scheduler.tasks import run_task_manager
+    if not advisory_lock_has_waiter("task_manager_lock"):
+        print("No waiter, scheduling")
+        run_task_manager.delay()
+    else:
+        print("Not scheduling")
+
+
+def _schedule_task_manager():
     from django.db import connection
     # runs right away if not in transaction
-    connection.on_commit(lambda: run_task_manager.delay())
+    connection.on_commit(_schedule_task_manager_if_no_waiter)
 
 
 @contextlib.contextmanager
