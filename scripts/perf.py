@@ -40,7 +40,7 @@ class TS():
 
 
 class Experiment():
-    COLUMNS = ('parent_uuid', 'job_id', 'host_name', 'event', 'failed', 'changed', 'uuid', 'playbook', 'play', 'role', 'task', 'counter', 'stdout', 'verbosity', 'start_line', 'end_line', 'modified', 'event_data',)
+    COLUMNS = ('parent_uuid', 'job_id', 'host_id', 'host_name', 'event', 'failed', 'changed', 'uuid', 'playbook', 'play', 'role', 'task', 'counter', 'stdout', 'verbosity', 'start_line', 'end_line', 'modified', 'created', 'event_data',)
 
     def __init__(self, process_count=1, event_size=1):
         self.queue = Queue()
@@ -62,7 +62,7 @@ class Experiment():
         self.id = uuid.uuid4()
         self.epoch = datetime.now()
 
-        self.VALUES = ('1', '1', 'blah', 'runner_on_ok', False, False, f'{self.id}', 'test.yml', 'play', 'role', 'task', 0, 'stdout', 0, 0, 0, f'{self.epoch}',)
+        self.VALUES = ('1', '1', '1', 'blah', 'runner_on_ok', False, False, f'{self.id}', 'test.yml', 'play', 'role', 'task', 0, 'stdout', 0, 0, 0, f'{self.epoch}', f'{self.epoch}')
 
     def run_pre(self):
         # Fills self.events
@@ -171,6 +171,7 @@ def run():
     single_threaded = [1, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
     multi_threaded = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
+    '''
     print("Single threaded INSERT experiment")
     print(f"experiment, process_count, event_size, inserts_per_second")
     for i in single_threaded:
@@ -178,12 +179,14 @@ def run():
         exp.run()
     print("")
 
+    '''
     print("Single threaded COPY FROM experiment")
     print(f"experiment, process_count, event_size, inserts_per_second")
     for i in single_threaded:
         exp = CopyFromExperiment(process_count=1, event_size=i)
         exp.run()
 
+    '''
     print("Multi threaded INSERT experiment")
     print(f"experiment, process_count, event_size, inserts_per_second")
     for i in multi_threaded:
@@ -197,5 +200,6 @@ def run():
         exp = CopyFromExperiment(process_count=i, event_size=2048)
         exp.run()
     print("")
+    '''
 
 
