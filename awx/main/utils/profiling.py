@@ -43,8 +43,11 @@ class AWXTiming(AWXProfileBase):
         self.generate_results()
         self.output_results()
 
+    def totaltime(self):
+        return self.time_end - self.time_start
+
     def generate_results(self):
-        diff = (self.time_end - self.time_start).total_seconds()
+        diff = self.totaltime().total_seconds()
         self.results = {
             'name': self.name,
             'diff': f'{diff}-seconds',
@@ -53,6 +56,24 @@ class AWXTiming(AWXProfileBase):
     def output_results(self):
         fname = f"{self.results['diff']}-{self.name}-{uuid.uuid4()}.time"
         super().output_results(fname)
+
+
+class AWXTimingAdditive(AWXTiming):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.time_total = None
+
+    def totaltime(self):
+        return self.time_total
+
+    def stop(self):
+        self.time_end = datetime.datetime.now()
+
+        diff = self.time_end - self.time_start
+        if self.time_total:
+            self.time_total += diff
+        else:
+            self.time_total = diff
 
 
 def timing(name, *init_args, **init_kwargs):
@@ -149,3 +170,38 @@ def profile(name, *init_args, **init_kwargs):
         return wrapper_profile
     return decorator_profile
 
+
+class SchedStat:
+    TIME_UNIT = 1000000000
+
+    def __init__(self, pid=None):
+        self.pid = pid
+        self.stats_start = None
+        self.stats_stop = None
+        self.started = False
+
+    def start(self):
+        if not self.pid:
+            self.pid = os.getpid()
+
+        self.fh = open(f'/proc/{self.pid}/schedstat')
+        self.stats_start = self.get()
+        self.started = True
+
+    def stop(self):
+        self.stats_stop = self.get()
+        self.started = False
+
+    def get(self):
+        self.fh.seek(0)
+        data = self.fh.read()
+
+        (time_on_cpu, time_waiting_for_cpu, slices) = data.split(' ')
+
+        return (int(time_on_cpu), int(time_waiting_for_cpu))
+
+    def diff(self):
+        time_on_cpu = (self.stats_stop[0] - self.stats_start[0]) / self.TIME_UNIT
+        time_waiting_for_cpu = (self.stats_stop[1] - self.stats_start[1]) / self.TIME_UNIT
+
+        return (time_on_cpu, time_waiting_for_cpu)

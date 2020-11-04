@@ -717,7 +717,8 @@ class UnifiedJobSerializer(BaseSerializer):
                   'failed', 'started', 'finished', 'canceled_on', 'elapsed', 'job_args',
                   'job_cwd', 'job_env', 'job_explanation',
                   'execution_node', 'controller_node',
-                  'result_traceback', 'event_processing_finished')
+                  'result_traceback', 'event_processing_finished',
+                  'time_on_cpu', 'time_waiting_for_cpu',)
         extra_kwargs = {
             'unified_job_template': {
                 'source': 'unified_job_template_id',

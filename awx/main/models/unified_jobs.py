@@ -720,6 +720,14 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         'Credential',
         related_name='%(class)ss',
     )
+    time_on_cpu = models.PositiveIntegerField(
+        default=0,
+        editable=False,
+    )
+    time_waiting_for_cpu = models.PositiveIntegerField(
+        default=0,
+        editable=False,
+    )
 
     def get_absolute_url(self, request=None):
         RealClass = self.get_real_instance_class()

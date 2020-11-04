@@ -79,6 +79,7 @@ from awx.main.utils.external_logging import reconfigure_rsyslog
 from awx.main.utils.safe_yaml import safe_dump, sanitize_jinja
 from awx.main.utils.reload import stop_local_services
 from awx.main.utils.pglock import advisory_lock
+from awx.main.utils.profiling import SchedStat
 from awx.main.consumers import emit_channel_notification
 from awx.main import analytics
 from awx.conf import settings_registry
@@ -1209,6 +1210,8 @@ class BaseTask(object):
 
 
     def event_handler(self, event_data):
+        if not self.stats.started:
+            self.stats.start()
         #
         # ⚠️  D-D-D-DANGER ZONE ⚠️
         # This method is called once for *every event* emitted by Ansible
@@ -1290,6 +1293,10 @@ class BaseTask(object):
         return False
 
     def finished_callback(self, runner_obj):
+        self.stats.stop()
+        (time_on_cpu, time_waiting_for_cpu) = self.stats.diff()
+        logger.warn(f"Time spent on cpu {time_on_cpu} vs {time_waiting_for_cpu}")
+        self.instance = self.update_model(self.instance.pk, time_waiting_for_cpu=time_waiting_for_cpu, time_on_cpu=time_on_cpu)
         '''
         Ansible runner callback triggered on finished run
         '''
@@ -1471,6 +1478,7 @@ class BaseTask(object):
                     del params[v]
 
             self.dispatcher = CallbackQueueDispatcher()
+            self.stats = SchedStat()
             if self.instance.is_isolated() or containerized:
                 module_args = None
                 if 'module_args' in params:
