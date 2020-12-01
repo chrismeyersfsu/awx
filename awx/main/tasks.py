@@ -903,6 +903,29 @@ class BaseTask(object):
             params['container_volume_mounts'] = []
             for this_path in settings.AWX_PROOT_SHOW_PATHS:
                 params['container_volume_mounts'].append(f'{this_path}:{this_path}:Z')
+        if getattr(settings, 'AWX_CONTAINER_PYTHON_MODULES_DEV_PATH', None):
+            root_module_path = os.path.join("/awx_devel", settings.AWX_CONTAINER_PYTHON_MODULES_DEV_PATH)
+            root_module_path_exec_container = os.path.join("/", settings.AWX_CONTAINER_PYTHON_MODULES_DEV_PATH)
+            volumes = [
+                "-v",
+                f'{root_module_path}:{root_module_path_exec_container}:Z'
+            ]
+            exec_container_modules = []
+
+            for f in os.listdir(settings.AWX_CONTAINER_PYTHON_MODULES_DEV_PATH):
+                module_path = os.path.join(settings.AWX_CONTAINER_PYTHON_MODULES_DEV_PATH, f)
+                if not os.path.isdir(module_path):
+                    continue
+
+                exec_container_modules.append(os.path.join(root_module_path_exec_container, f))
+
+            # environment
+            volumes.extend([
+                '--env',
+                f'PYTHONPATH={":".join(exec_container_modules)}',
+            ])
+
+            params['container_options'] = volumes
         return params
 
     def build_private_data(self, instance, private_data_dir):
@@ -1500,7 +1523,6 @@ class BaseTask(object):
                 ansible_runner.interface.run(streamer='transmit',
                                              _output=_socket.makefile('wb'),
                                              **params)
-
                 # Socket must be shutdown here, or the reader will hang forever.
                 _socket.shutdown(socket.SHUT_WR)
 
