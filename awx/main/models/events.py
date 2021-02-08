@@ -485,6 +485,9 @@ class JobEvent(BasePlaybookEvent):
         default='',
         editable=False,
     )
+    job_created = models.DateTimeField(
+        editable=False
+    )
 
     def get_absolute_url(self, request=None):
         return reverse('api:job_event_detail', kwargs={'pk': self.pk}, request=request)
