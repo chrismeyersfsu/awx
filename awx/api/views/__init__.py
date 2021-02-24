@@ -892,6 +892,11 @@ class ProjectUpdateEventsList(SubListAPIView):
         response['X-UI-Max-Events'] = settings.MAX_UI_JOB_EVENTS
         return super(ProjectUpdateEventsList, self).finalize_response(request, response, *args, **kwargs)
 
+    def get_queryset(self):
+        job = self.get_parent_object()
+        self.check_parent_access(job)
+        qs = job.job_events.select_related('host').filter(job_created=job.created).order_by('start_line')
+        return qs.all()
 
 class SystemJobEventsList(SubListAPIView):
 
@@ -906,6 +911,11 @@ class SystemJobEventsList(SubListAPIView):
         response['X-UI-Max-Events'] = settings.MAX_UI_JOB_EVENTS
         return super(SystemJobEventsList, self).finalize_response(request, response, *args, **kwargs)
 
+    def get_queryset(self):
+        job = self.get_parent_object()
+        self.check_parent_access(job)
+        qs = job.job_events.select_related('host').filter(job_created=job.created).order_by('start_line')
+        return qs.all()
 
 class ProjectUpdateCancel(RetrieveAPIView):
 
@@ -3857,7 +3867,7 @@ class HostJobEventsList(BaseJobEventsList):
     def get_queryset(self):
         parent_obj = self.get_parent_object()
         self.check_parent_access(parent_obj)
-        qs = self.request.user.get_queryset(self.model).filter(host=parent_obj)
+        qs = self.request.user.get_queryset(self.model).filter(host=parent_obj, job_created=parent_obj.created)
         return qs
 
 
@@ -4055,6 +4065,12 @@ class BaseAdHocCommandEventsList(NoTruncateMixin, SubListAPIView):
     relationship = 'ad_hoc_command_events'
     name = _('Ad Hoc Command Events List')
     search_fields = ('stdout',)
+
+    def get_queryset(self):
+        job = self.get_parent_object()
+        self.check_parent_access(job)
+        qs = job.job_events.select_related('host').filter(job_created=job.created).order_by('start_line')
+        return qs.all()
 
 
 class HostAdHocCommandEventsList(BaseAdHocCommandEventsList):
