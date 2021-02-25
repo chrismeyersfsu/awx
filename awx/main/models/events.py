@@ -609,6 +609,10 @@ class ProjectUpdateEvent(BasePlaybookEvent):
         on_delete=models.CASCADE,
         editable=False,
     )
+    job_created = models.DateTimeField(
+        null=True,
+        editable=False
+    )
 
     @property
     def host_name(self):
@@ -786,6 +790,10 @@ class AdHocCommandEvent(BaseCommandEvent):
         default='',
         editable=False,
     )
+    job_created = models.DateTimeField(
+        null=True,
+        editable=False
+    )
 
     def get_absolute_url(self, request=None):
         return reverse('api:ad_hoc_command_event_detail', kwargs={'pk': self.pk}, request=request)
@@ -824,6 +832,10 @@ class InventoryUpdateEvent(BaseCommandEvent):
         on_delete=models.CASCADE,
         editable=False,
     )
+    job_created = models.DateTimeField(
+        null=True,
+        editable=False
+    )
 
     @property
     def event(self):
@@ -857,6 +869,10 @@ class SystemJobEvent(BaseCommandEvent):
         related_name='system_job_events',
         on_delete=models.CASCADE,
         editable=False,
+    )
+    job_created = models.DateTimeField(
+        null=True,
+        editable=False
     )
 
     @property
