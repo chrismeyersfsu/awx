@@ -59,7 +59,7 @@ __all__ = [
     'has_model_field_prefetched', 'set_environ', 'IllegalArgumentError',
     'get_custom_venv_choices', 'get_external_account', 'task_manager_bulk_reschedule',
     'schedule_task_manager', 'classproperty', 'create_temporary_fifo', 'truncate_stdout',
-    'deepmerge'
+    'deepmerge', 'get_event_partition_epoch',
 ]
 
 
@@ -163,6 +163,14 @@ def memoize(ttl=60, cache_key=None, track_function=False, cache=None):
 def memoize_delete(function_name):
     cache = get_memoize_cache()
     return cache.delete(function_name)
+
+
+@memoize(ttl=3600 * 24)  # in practice, we only need this to load once at process startup time
+def get_event_partition_epoch():
+    from django.db.migrations.recorder import MigrationRecorder
+    return MigrationRecorder.Migration.objects.filter(
+        app='main', name='0124_event_partitions'
+    ).first().applied
 
 
 @memoize()

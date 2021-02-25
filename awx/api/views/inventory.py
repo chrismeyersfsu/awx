@@ -54,8 +54,6 @@ from awx.api.views.mixin import (
 
 logger = logging.getLogger('awx.api.views.organization')
 
-EPOCH = datetime.datetime.utcfromtimestamp(0)
-
 
 class InventoryUpdateEventsList(SubListAPIView):
 
@@ -68,7 +66,7 @@ class InventoryUpdateEventsList(SubListAPIView):
 
     def get_queryset(self):
         return super(InventoryUpdateEventsList, self).get_queryset().filter(
-            job_created__in=(self.get_parent_object().created, EPOCH)
+            job_created=self.get_parent_object().created_or_epoch
         )
 
     def finalize_response(self, request, response, *args, **kwargs):
