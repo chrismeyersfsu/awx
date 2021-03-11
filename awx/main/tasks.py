@@ -766,7 +766,14 @@ def migrate_legacy_event_data(tblname):
             while total_rows:
                 with transaction.atomic():
                     cursor.execute(
-                        f'''INSERT INTO {tblname} SELECT *, '1970-01-01' as job_created FROM _unpartitioned_{tblname} ORDER BY id DESC LIMIT {chunk} RETURNING id;'''
+                        f'''
+                        INSERT INTO {tblname}
+                            SELECT *, '1970-01-01' as job_created
+                            FROM _unpartitioned_{tblname}
+                        ORDER BY id
+                            DESC LIMIT {chunk}
+                            RETURNING id;
+                        '''
                     )
                     last_insert_pk = cursor.fetchone()
                     if last_insert_pk is None:
