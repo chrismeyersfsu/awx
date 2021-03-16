@@ -6,7 +6,6 @@ from collections import OrderedDict
 from django.db.models.deletion import Collector, SET_NULL, CASCADE
 from django.core.management import call_command
 
-from awx.main.utils.deletion import AWXCollector
 from awx.main.models import (
     JobTemplate, User, Job, JobEvent, Notification,
     WorkflowJobNode, JobHostSummary
@@ -109,71 +108,3 @@ def test_cleanup_jobs(setup_environment):
     for (model,fieldname), values in related_should_be_null.items():
         for v in values:
             assert not getattr(model.objects.get(pk=v), fieldname)
-
-
-@pytest.mark.django_db
-def test_awxcollector(setup_environment):
-    '''
-    Efforts to improve the performance of cleanup_jobs involved
-    sub-classing the django Collector class. This unit test will
-    check for parity between the django Collector and the modified
-    AWXCollector class. AWXCollector is used in cleanup_jobs to
-    bulk-delete old jobs from the database.
-
-    Specifically, Collector has four dictionaries to check:
-    .dependencies, .data, .fast_deletes, and .field_updates
-
-    These tests will convert each dictionary from AWXCollector
-    (after running .collect on jobs), from querysets to sets of
-    objects. The final result should be a dictionary that is
-    equivalent to django's Collector.
-    '''
-
-    (old_jobs, new_jobs, days_str) = setup_environment
-    collector = Collector('default')
-    collector.collect(old_jobs)
-
-    awx_col = AWXCollector('default')
-    # awx_col accepts a queryset as input
-    awx_col.collect(Job.objects.filter(pk__in=[obj.pk for obj in old_jobs]))
-
-    # check that dependencies are the same
-    assert awx_col.dependencies == collector.dependencies
-
-    # check that objects to delete are the same
-    awx_del_dict = OrderedDict()
-    for model, instances in awx_col.data.items():
-        awx_del_dict.setdefault(model, set())
-        for inst in instances:
-            # .update() will put each object in a queryset into the set
-            awx_del_dict[model].update(inst)
-    assert awx_del_dict == collector.data
-
-    # check that field updates are the same
-    awx_del_dict = OrderedDict()
-    for model, instances_for_fieldvalues in awx_col.field_updates.items():
-        awx_del_dict.setdefault(model, {})
-        for (field, value), instances in instances_for_fieldvalues.items():
-            awx_del_dict[model].setdefault((field,value), set())
-            for inst in instances:
-                awx_del_dict[model][(field,value)].update(inst)
-
-    # collector field updates don't use the base (polymorphic parent) model, e.g.
-    # it will use JobTemplate instead of UnifiedJobTemplate. Therefore,
-    # we need to rebuild the dictionary and grab the model from the field
-    collector_del_dict = OrderedDict()
-    for model, instances_for_fieldvalues in collector.field_updates.items():
-        for (field,value), instances in instances_for_fieldvalues.items():
-            collector_del_dict.setdefault(field.model, {})
-            collector_del_dict[field.model][(field, value)] = collector.field_updates[model][(field,value)]
-    assert awx_del_dict == collector_del_dict
-
-    # check that fast deletes are the same
-    collector_fast_deletes = set()
-    for q in collector.fast_deletes:
-        collector_fast_deletes.update(q)
-
-    awx_col_fast_deletes = set()
-    for q in awx_col.fast_deletes:
-        awx_col_fast_deletes.update(q)
-    assert collector_fast_deletes == awx_col_fast_deletes
