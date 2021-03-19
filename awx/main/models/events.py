@@ -65,6 +65,16 @@ MINIMAL_EVENTS = set([
 ])
 
 
+def get_event_job_relationship_name(event):
+    return {
+        JobEvent: 'job_id',
+        AdHocCommandEvent: 'ad_hoc_command_id',
+        ProjectUpdateEvent: 'project_update_id',
+        InventoryUpdateEvent: 'inventory_update_id',
+        SystemJobEvent: 'system_job_id',
+    }[event.__class__]
+
+
 def emit_event_detail(event):
     if (
         settings.UI_LIVE_UPDATES_ENABLED is False and
@@ -72,13 +82,7 @@ def emit_event_detail(event):
     ):
         return
     cls = event.__class__
-    relation = {
-        JobEvent: 'job_id',
-        AdHocCommandEvent: 'ad_hoc_command_id',
-        ProjectUpdateEvent: 'project_update_id',
-        InventoryUpdateEvent: 'inventory_update_id',
-        SystemJobEvent: 'system_job_id',
-    }[cls]
+    relation = get_event_job_relationship_name(event)
     url = ''
     if isinstance(event, JobEvent):
         url = '/api/v2/job_events/{}'.format(event.id)
@@ -373,14 +377,6 @@ class BasePlaybookEvent(CreatedModifiedModel):
                     JobEvent.objects.filter(
                         job_id=self.job_id, uuid__in=failed
                     ).update(failed=True)
-
-                    # send success/failure notifications when we've finished handling the playbook_on_stats event
-                    from awx.main.tasks import handle_success_and_failure_notifications  # circular import
-
-                    def _send_notifications():
-                        handle_success_and_failure_notifications.apply_async([job.id])
-                    connection.on_commit(_send_notifications)
-
 
         for field in ('playbook', 'play', 'task', 'role'):
             value = force_text(event_data.get(field, '')).strip()

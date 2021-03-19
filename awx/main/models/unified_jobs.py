@@ -1512,3 +1512,29 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         else:
             msg = f"{self._meta.model_name}-{self.id} {state.replace('_', ' ')}"
         logger_job_lifecycle.debug(msg, extra=extra)
+
+    def do_finish_job(self, final_counter, guid):
+        from django_guid.middleware import GuidMiddleware
+        from awx.main.tasks import handle_success_and_failure_notifications
+        try:
+            GuidMiddleware.set_guid(guid)
+            logger.info('Event processing is finished for Job {}, sending notifications'.format(self.id))
+            # EOF events are sent when stdout for the running task is
+            # closed. don't actually persist them to the database; we
+            # just use them to report `summary` websocket events as an
+            # approximation for when a job is "done"
+            emit_channel_notification(
+                'jobs-summary',
+                dict(group_name='jobs', unified_job_id=self.id, final_counter=final_counter)
+            )
+            # Additionally, when we've processed all events, we should
+            # have all the data we need to send out success/failure
+            # notification templates
+
+            if hasattr(self, 'send_notification_templates'):
+                handle_success_and_failure_notifications.apply_async([self.id])
+        except Exception:
+            logger.exception('Worker failed to emit notifications: Job {}'.format(self.id))
+        finally:
+            GuidMiddleware.set_guid('')
+        return

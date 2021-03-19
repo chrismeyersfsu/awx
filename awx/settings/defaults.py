@@ -787,6 +787,8 @@ ACTIVITY_STREAM_ENABLED_FOR_INVENTORY_SYNC = False
 
 CALLBACK_QUEUE = "callback_tasks"
 
+CALLBACK_PROCESSING_QUEUE = "callback_tasks_processing"
+
 # Note: This setting may be overridden by database settings.
 ORG_ADMINS_CAN_SEE_ALL_USERS = True
 MANAGE_ORGANIZATION_AUTH = True

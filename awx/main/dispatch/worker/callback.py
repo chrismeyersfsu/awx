@@ -8,7 +8,7 @@ import traceback
 from django.conf import settings
 from django.utils.timezone import now as tz_now
 from django.db import DatabaseError, OperationalError, connection as django_connection
-from django.db.utils import InterfaceError, InternalError
+from django.db.utils import InterfaceError, InternalError, IntegrityError
 from django_guid.middleware import GuidMiddleware
 
 import psutil
@@ -20,8 +20,9 @@ from awx.main.models import (JobEvent, AdHocCommandEvent, ProjectUpdateEvent,
                              InventoryUpdateEvent, SystemJobEvent, UnifiedJob,
                              Job)
 from awx.main.tasks import handle_success_and_failure_notifications
-from awx.main.models.events import emit_event_detail
+from awx.main.models.events import emit_event_detail, get_event_job_relationship_name
 from awx.main.utils.profiling import AWXProfiler
+from awx.main.queue import CallbackQueueDispatcher
 
 from .base import BaseWorker
 
@@ -46,19 +47,38 @@ class CallbackBrokerWorker(BaseWorker):
 
     def __init__(self):
         self.buff = {}
+        self.events_from_redis = []
+        self.events_duplicate = set()
+        self.events_saved = set()
+
         self.pid = os.getpid()
+        self.dispatcher = CallbackQueueDispatcher()
         self.redis = redis.Redis.from_url(settings.BROKER_URL)
         self.prof = AWXProfiler("CallbackBrokerWorker")
         for key in self.redis.keys('awx_callback_receiver_statistics_*'):
             self.redis.delete(key)
 
+        # Recover on-start
+        # TODO: This may be racy. If other workers can start before the cleanup has finished
+        # Ideally, use the parent to coordinate somehow
+        self._on_start()
+
+    def _on_start(self):
+        total = self.redis.llen(settings.CALLBACK_PROCESSING_QUEUE)
+        if total > 0:
+            logger.warn(f"Recovering {total} events from {settings.CALLBACK_PROCESSING_QUEUE} redis queue")
+        while True:
+            res = self.redis.rpoplpush(settings.CALLBACK_PROCESSING_QUEUE, settings.CALLBACK_QUEUE)
+            if res is None:
+                break
+
     def read(self, queue):
         try:
-            res = self.redis.blpop(settings.CALLBACK_QUEUE, timeout=1)
+            res = self.redis.brpoplpush(settings.CALLBACK_QUEUE, settings.CALLBACK_PROCESSING_QUEUE, timeout=1)
             if res is None:
                 return {'event': 'FLUSH'}
             self.total += 1
-            return json.loads(res[1])
+            return json.loads(res)
         except redis.exceptions.RedisError:
             logger.exception("encountered an error communicating with redis")
             time.sleep(1)
@@ -108,13 +128,22 @@ class CallbackBrokerWorker(BaseWorker):
             any([len(events) >= 1000 for events in self.buff.values()])
         ):
             for cls, events in self.buff.items():
+                duplicate_events = 0
+                # key: job_identifier
+                # value: number of events processed in this flush
+                job_events_processed = {}
                 logger.debug(f'{cls.__name__}.objects.bulk_create({len(events)})')
                 for e in events:
                     if not e.created:
                         e.created = now
                     e.modified = now
+
+                    job_identifier = getattr(e, get_event_job_relationship_name(e))
+                    job_events_processed[job_identifier] = job_events_processed.get(job_identifier, 0) + 1
                 try:
+                    raise Exception
                     cls.objects.bulk_create(events)
+                    self.events_saved = set([e.uuid for e in events])
                 except Exception:
                     # if an exception occurs, we should re-attempt to save the
                     # events one-by-one, because something in the list is
@@ -122,11 +151,41 @@ class CallbackBrokerWorker(BaseWorker):
                     for e in events:
                         try:
                             e.save()
+                            self.events_saved.add(e.uuid)
+                        except IntegrityError:
+                            self.events_duplicate.add(e.uuid)
                         except Exception:
+                            job_identifier = getattr(e, get_event_job_relationship_name(e))
+                            job_events_processed[job_identifier] -= 1
                             logger.exception('Database Error Saving Job Event')
+
                 for e in events:
                     emit_event_detail(e)
+
+                """
+                The below code is to solve keeping two data-sources in sync, the postgres database and redis.
+                Postgres stores the events, redis stores the count of events for efficiency. We have a sort of two phase commit. First, we "checkout" an
+                event from the redis event queue by moving it from one queue to another. Next, we save the event to the database, finally we remove the
+                event from the second redis queue to complete the transaction.
+
+                Possible Failures:
+                1 Crash after checkout but before writing event to postgres
+                  * Event will be picked up on callback reciever restart
+                2 Crash after event inserted into Postgres but before per-event processed count updated
+                  * Event will be processed a second time upon callback receiver restart. Per-job event processed count will, correctly, be increased by 1.
+
+                """
+
+                events_to_commit = [e for e in self.events_from_redis if e['uuid'] in self.events_saved.union(self.events_duplicate)]
+
+                with self.dispatcher.pipeline() as pipe_results:
+                    [self.dispatcher.incr_job_events_processed(k, v) for k, v in job_events_processed.items()]
+                    [self.dispatcher.commit_event(e) for e in events_to_commit]
+
             self.buff = {}
+            self.events_from_redis = []
+            self.events_saved = set()
+            self.events_duplicate = set()
             self.last_flush = time.time()
 
     def perform_work(self, body):
@@ -151,40 +210,13 @@ class CallbackBrokerWorker(BaseWorker):
 
                 self.last_event = f'\n\t- {cls.__name__} for #{job_identifier} ({body.get("event", "")} {body.get("uuid", "")})'  # noqa
 
-                if body.get('event') == 'EOF':
-                    try:
-                        if 'guid' in body:
-                            GuidMiddleware.set_guid(body['guid'])
-                        final_counter = body.get('final_counter', 0)
-                        logger.info('Event processing is finished for Job {}, sending notifications'.format(job_identifier))
-                        # EOF events are sent when stdout for the running task is
-                        # closed. don't actually persist them to the database; we
-                        # just use them to report `summary` websocket events as an
-                        # approximation for when a job is "done"
-                        emit_channel_notification(
-                            'jobs-summary',
-                            dict(group_name='jobs', unified_job_id=job_identifier, final_counter=final_counter)
-                        )
-                        # Additionally, when we've processed all events, we should
-                        # have all the data we need to send out success/failure
-                        # notification templates
-                        uj = UnifiedJob.objects.get(pk=job_identifier)
+                try:
+                    event = cls.create_from_data(**body)
+                    self.buff.setdefault(cls, []).append(event)
+                except IntegrityError:
+                    self.events_duplicate.add(body['uuid'])
 
-                        if isinstance(uj, Job):
-                            # *actual playbooks* send their success/failure
-                            # notifications in response to the playbook_on_stats
-                            # event handling code in main.models.events
-                            pass
-                        elif hasattr(uj, 'send_notification_templates'):
-                            handle_success_and_failure_notifications.apply_async([uj.id])
-                    except Exception:
-                        logger.exception('Worker failed to emit notifications: Job {}'.format(job_identifier))
-                    finally:
-                        GuidMiddleware.set_guid('')
-                    return
-
-                event = cls.create_from_data(**body)
-                self.buff.setdefault(cls, []).append(event)
+                self.events_from_redis.append(body)
 
             retries = 0
             while retries <= self.MAX_RETRIES:

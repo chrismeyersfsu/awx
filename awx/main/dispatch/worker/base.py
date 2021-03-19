@@ -17,6 +17,7 @@ from django.conf import settings
 
 from awx.main.dispatch.pool import WorkerPool
 from awx.main.dispatch import pg_bus_conn
+from awx.main.queue import CallbackQueueDispatcher
 
 if 'run_callback_receiver' in sys.argv:
     logger = logging.getLogger('awx.main.commands.run_callback_receiver')
@@ -132,9 +133,42 @@ class AWXConsumerRedis(AWXConsumerBase):
         super(AWXConsumerRedis, self).run(*args, **kwargs)
         self.worker.on_start()
 
+        from awx.main.models import UnifiedJob
+        self.dispatcher = CallbackQueueDispatcher()
+
         while True:
             logger.debug(f'{os.getpid()} is alive')
-            time.sleep(60)
+            with self.dispatcher.pipeline() as pipe_results:
+                self.dispatcher.get_job_events_total()
+                self.dispatcher.get_job_events_processed()
+
+            events_total = self.dispatcher._redis_dict_to_int_int(pipe_results.pop(0))
+            events_processed = self.dispatcher._redis_dict_to_int_int(pipe_results.pop(0))
+
+            finished = []
+            for job_id, total in events_total.items():
+                count = events_processed.get(job_id, 0)
+                if count == total:
+                    finished.append(job_id)
+
+            if len(finished) > 0:
+                # TODO: Need to check job status before finishing the job
+                # This sort of polling shouldn't be that expensive if we consider _when_ it likely happens. It likely happens that job event processing lags
+                # a job finishing, especially when the system is under load. If this is the case, the Job status will only need to be looked up once.
+                # We only wastefully lookup job status' when event processing finishes _before_ the job. This can happen for small jobs.
+                with self.dispatcher.pipeline() as pipe_results:
+                    [self.dispatcher.get_job_extra_data(job_id) for job_id in finished]
+                    self.dispatcher.delete_in_flight_jobs(finished)
+                    self.dispatcher.set_job_events_complete(finished)
+
+                extra_data = pipe_results[0:len(finished)]
+
+                for job_id in finished:
+                    guid = json.loads(extra_data.pop(0))['guid']
+                    uj = UnifiedJob.objects.get(id=job_id)
+                    uj.do_finish_job(events_total[job_id], guid)
+
+            time.sleep(1)
 
 
 class AWXConsumerPG(AWXConsumerBase):
@@ -181,6 +215,7 @@ class BaseWorker(object):
             except QueueEmpty:
                 continue
             except Exception as e:
+                raise e
                 logger.error("Exception on worker {}, restarting: ".format(idx) + str(e))
                 continue
             try:
@@ -188,7 +223,7 @@ class BaseWorker(object):
                     # If the database connection has a hiccup during the prior message, close it
                     # so we can establish a new connection
                     conn.close_if_unusable_or_obsolete()
-                self.perform_work(body, *args)
+                    self.perform_work(body, *args)
             finally:
                 if 'uuid' in body:
                     uuid = body['uuid']

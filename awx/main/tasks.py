@@ -1291,13 +1291,11 @@ class BaseTask(object):
         '''
         Ansible runner callback triggered on finished run
         '''
-        event_data = {
-            'event': 'EOF',
-            'final_counter': self.event_ct,
-            'guid': self.guid,
-        }
-        event_data.setdefault(self.event_data_key, self.instance.id)
-        self.dispatcher.dispatch(event_data)
+        with self.dispatcher.pipeline():
+            self.dispatcher.set_job_event_total(self.instance.id, self.event_ct)
+            self.dispatcher.set_job_extra_data(self.instance.id, dict(guid=self.guid))
+        # TODO: It's possible that _this_ is the place that should trigger the job done processing.
+        # We could be sending the total, and all the events are done processing.
 
     def status_handler(self, status_data, runner_config):
         '''
