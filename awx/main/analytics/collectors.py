@@ -401,7 +401,7 @@ def _events_table(since, full_path, until, tbl, **kwargs):
                          {tbl}.uuid,
                          {tbl}.parent_uuid,
                          {tbl}.event,
-                         {event_data}->'task_action' AS task_action,
+                         task_action,
                          (CASE WHEN event = 'playbook_on_stats' THEN event_data END) as playbook_on_stats,
                          {tbl}.failed,
                          {tbl}.changed,
@@ -412,12 +412,12 @@ def _events_table(since, full_path, until, tbl, **kwargs):
                          {tbl}.job_id,
                          {tbl}.host_id,
                          {tbl}.host_name,
-                         CAST({event_data}->>'start' AS TIMESTAMP WITH TIME ZONE) AS start,
-                         CAST({event_data}->>'end' AS TIMESTAMP WITH TIME ZONE) AS end,
-                         {event_data}->'duration' AS duration,
-                         {event_data}->'res'->'warnings' AS warnings,
-                         {event_data}->'res'->'deprecations' AS deprecations
-                         FROM {tbl}
+                         CAST(x.start AS TIMESTAMP WITH TIME ZONE) AS start,
+                         CAST(x.end AS TIMESTAMP WITH TIME ZONE) AS end,
+                         x.duration AS duration,
+                         x.res->'warnings' AS warnings,
+                         x.res->'deprecations' AS deprecations
+                         FROM {tbl}, json_to_record({event_data}) AS x("res" json, "duration" text, "task_action" text, "start" text, "end" text)
                          WHERE ({tbl}.id > {since} AND {tbl}.id <= {until})
                          ORDER BY {tbl}.id ASC) TO STDOUT WITH CSV HEADER'''
 
@@ -437,7 +437,7 @@ def events_table_unpartitioned(since, full_path, until, **kwargs):
 # scans. However, we may find some other reason to want to gather by partition. Maybe the load on the DB server is greater when using the per-partition index
 # scan vs. a full sequential table scan. If we _do_ want to gather by partitions in the future note that both per-partition gathering and gathering by modified
 # time is required for correctness.
-# @register('events_table', '1.2', format='csv', description=_('Automation task records'), expensive=events_slicing_partitioned)
+@register('events_table', '1.2', format='csv', description=_('Automation task records'), expensive=events_slicing_partitioned)
 def events_table_partitioned(start, full_path, until, **kwargs):
     tbl = start
 
@@ -450,7 +450,7 @@ def events_table_partitioned(start, full_path, until, **kwargs):
                          {tbl}.uuid,
                          {tbl}.parent_uuid,
                          {tbl}.event,
-                         {event_data}->'task_action' AS task_action,
+                         task_action,
                          (CASE WHEN event = 'playbook_on_stats' THEN event_data END) as playbook_on_stats,
                          {tbl}.failed,
                          {tbl}.changed,
@@ -461,12 +461,13 @@ def events_table_partitioned(start, full_path, until, **kwargs):
                          {tbl}.job_id,
                          {tbl}.host_id,
                          {tbl}.host_name,
-                         CAST({event_data}->>'start' AS TIMESTAMP WITH TIME ZONE) AS start,
-                         CAST({event_data}->>'end' AS TIMESTAMP WITH TIME ZONE) AS end,
-                         {event_data}->'duration' AS duration,
-                         {event_data}->'res'->'warnings' AS warnings,
-                         {event_data}->'res'->'deprecations' AS deprecations
-                         FROM {tbl}) TO STDOUT WITH CSV HEADER'''
+                         CAST(x.start AS TIMESTAMP WITH TIME ZONE) AS start,
+                         CAST(x.end AS TIMESTAMP WITH TIME ZONE) AS end,
+                         x.duration AS duration,
+                         x.res->'warnings' AS warnings,
+                         x.res->'deprecations' AS deprecations
+                         FROM {tbl}, json_to_record({event_data}) AS x("res" json, "duration" text, "task_action" text, "start" text, "end" text)
+                         ) TO STDOUT WITH CSV HEADER'''
 
     try:
         return _copy_table(table='events', query=query(f"{tbl}.event_data::json"), path=full_path)
@@ -474,7 +475,7 @@ def events_table_partitioned(start, full_path, until, **kwargs):
         return _copy_table(table='events', query=query(f"replace({tbl}.event_data::text, '\\u0000', '')::json"), path=full_path)
 
 
-@register('events_table', '1.2', format='csv', description=_('Automation task records'), expensive=events_slicing_partitioned_modified)
+# @register('events_table', '1.2', format='csv', description=_('Automation task records'), expensive=events_slicing_partitioned_modified)
 def events_table_partitioned_modified(since, full_path, until, **kwargs):
     return _events_table(since, full_path, until, 'main_jobevent', **kwargs)
 
