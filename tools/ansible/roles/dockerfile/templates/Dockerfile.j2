@@ -22,6 +22,7 @@ RUN rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial
 RUN dnf -y update && dnf install -y 'dnf-command(config-manager)' && \
     dnf config-manager --set-enabled crb && \
     dnf -y install \
+    cmake \
     gcc \
     gcc-c++ \
     git-core \
@@ -29,6 +30,7 @@ RUN dnf -y update && dnf install -y 'dnf-command(config-manager)' && \
     glibc-langpack-en \
     libffi-devel \
     libtool-ltdl-devel \
+    libuv-devel \
     make \
 {% if not headless|bool %}
     nodejs \
@@ -44,7 +46,8 @@ RUN dnf -y update && dnf install -y 'dnf-command(config-manager)' && \
     swig \
     unzip \
     xmlsec1-devel \
-    xmlsec1-openssl-devel
+    xmlsec1-openssl-devel \
+    zlib-devel
 
 RUN pip3 install virtualenv build psycopg
 

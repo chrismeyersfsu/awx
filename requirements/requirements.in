@@ -53,6 +53,7 @@ sqlparse >= 0.4.4   # Required by django https://github.com/ansible/awx/security
 redis
 requests
 slack-sdk
+socketify
 tacacs_plus==1.0  # UPGRADE BLOCKER: auth does not work with later versions
 twilio
 twisted[tls]
