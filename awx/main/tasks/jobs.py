@@ -602,28 +602,27 @@ class BaseTask(object):
                 )
             else:
                 receptor_job = AWXReceptorJob(self, params)
-                res = receptor_job.run()
-                self.unit_id = receptor_job.unit_id
+                self.unit_id = receptor_job.transmit()
 
-                if not res:
-                    return
+            #     if not res:
+            #         return
 
-            status = res.status
-            rc = res.rc
+            # status = res.status
+            # rc = res.rc
 
-            if status in ('timeout', 'error'):
-                self.runner_callback.delay_update(skip_if_already_set=True, job_explanation=f"Job terminated due to {status}")
-                if status == 'timeout':
-                    status = 'failed'
-            elif status == 'canceled':
-                self.instance = self.update_model(pk)
-                cancel_flag_value = getattr(self.instance, 'cancel_flag', False)
-                if (cancel_flag_value is False) and signal_callback():
-                    self.runner_callback.delay_update(skip_if_already_set=True, job_explanation="Task was canceled due to receiving a shutdown signal.")
-                    status = 'failed'
-                elif cancel_flag_value is False:
-                    self.runner_callback.delay_update(skip_if_already_set=True, job_explanation="The running ansible process received a shutdown signal.")
-                    status = 'failed'
+            # if status in ('timeout', 'error'):
+            #     self.runner_callback.delay_update(skip_if_already_set=True, job_explanation=f"Job terminated due to {status}")
+            #     if status == 'timeout':
+            #         status = 'failed'
+            # elif status == 'canceled':
+            #     self.instance = self.update_model(pk)
+            #     cancel_flag_value = getattr(self.instance, 'cancel_flag', False)
+            #     if (cancel_flag_value is False) and signal_callback():
+            #         self.runner_callback.delay_update(skip_if_already_set=True, job_explanation="Task was canceled due to receiving a shutdown signal.")
+            #         status = 'failed'
+            #     elif cancel_flag_value is False:
+            #         self.runner_callback.delay_update(skip_if_already_set=True, job_explanation="The running ansible process received a shutdown signal.")
+            #         status = 'failed'
         except ReceptorNodeNotFound as exc:
             self.runner_callback.delay_update(job_explanation=str(exc))
         except Exception:

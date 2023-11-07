@@ -295,6 +295,63 @@ def worker_cleanup(node_name, vargs, timeout=300.0):
     return stdout
 
 
+# TODO cmeyers:
+# @receptor_cleanup_enforcer(unit_id=self.unit_id)
+# """"
+# CleanupEnforcer will be a singleton of _CleanupEnforcer()
+# """"
+from contextlib import ContextDecorator
+
+
+class CleanupEnforcer(ContextDecorator):
+    def __init__(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.exec()
+        return False
+
+    def decision(self):
+        return False
+
+    def action(self):
+        pass
+
+    def action_err_handler(self):
+        pass
+
+    def exec(self):
+        if not self.decision():
+            return
+
+        try:
+            yield
+            self.action()
+        finally:
+            try:
+                self.action()
+            except Exception:
+                self.action_err_handler()
+
+
+class receptor_cleanup_enforcer(CleanupEnforcer):
+    def __init__(self, receptor_ctl, unit_id):
+        self.receptor_ctl = receptor_ctl
+        self.unit_id = unit_id
+
+    def decision(self):
+        return settings.RECEPTOR_RELEASE_WORK and self.unit_id is not None
+
+    def action(self):
+        self.receptor_ctl.simple_command(f"work release {self.unit_id}")
+
+    def action_err_handler(self):
+        logger.exception(f"Error releasing work unit {self.unit_id}.")
+
+
 class AWXReceptorJob:
     def __init__(self, task, runner_params=None):
         self.task = task
@@ -308,166 +365,88 @@ class AWXReceptorJob:
         if not settings.IS_K8S and self.work_type == 'local' and 'only_transmit_kwargs' not in self.runner_params:
             self.runner_params['only_transmit_kwargs'] = True
 
-    def run(self):
+    def transmit(self):
         # We establish a connection to the Receptor socket
         self.config_data = read_receptor_config()
         receptor_ctl = get_receptor_ctl(self.config_data)
 
-        res = None
-        try:
-            res = self._run_internal(receptor_ctl)
-            return res
-        finally:
-            # Make sure to always release the work unit if we established it
-            if self.unit_id is not None and settings.RECEPTOR_RELEASE_WORK:
-                try:
-                    receptor_ctl.simple_command(f"work release {self.unit_id}")
-                except Exception:
-                    logger.exception(f"Error releasing work unit {self.unit_id}.")
+        with receptor_cleanup_enforcer(receptor_ctl, self.unit_id):
+            # Create a socketpair. Where the left side will be used for writing our payload
+            # (private data dir, kwargs). The right side will be passed to Receptor for
+            # reading.
+            sockin, sockout = socket.socketpair()
 
-    def _run_internal(self, receptor_ctl):
-        # Create a socketpair. Where the left side will be used for writing our payload
-        # (private data dir, kwargs). The right side will be passed to Receptor for
-        # reading.
-        sockin, sockout = socket.socketpair()
+            # Prepare the submit_work kwargs before creating threads, because references to settings are not thread-safe
+            work_submit_kw = dict(worktype=self.work_type, params=self.receptor_params, signwork=self.sign_work)
+            if self.work_type == 'ansible-runner':
+                work_submit_kw['node'] = self.task.instance.execution_node
+                use_stream_tls = get_conn_type(work_submit_kw['node'], receptor_ctl).name == "STREAMTLS"
+                work_submit_kw['tlsclient'] = get_tls_client(self.config_data, use_stream_tls)
 
-        # Prepare the submit_work kwargs before creating threads, because references to settings are not thread-safe
-        work_submit_kw = dict(worktype=self.work_type, params=self.receptor_params, signwork=self.sign_work)
-        if self.work_type == 'ansible-runner':
-            work_submit_kw['node'] = self.task.instance.execution_node
-            use_stream_tls = get_conn_type(work_submit_kw['node'], receptor_ctl).name == "STREAMTLS"
-            work_submit_kw['tlsclient'] = get_tls_client(self.config_data, use_stream_tls)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                transmitter_future = executor.submit(self.transmit, sockin)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            transmitter_future = executor.submit(self.transmit, sockin)
+                # submit our work, passing in the right side of our socketpair for reading.
+                result = receptor_ctl.submit_work(payload=sockout.makefile('rb'), **work_submit_kw)
 
-            # submit our work, passing in the right side of our socketpair for reading.
-            result = receptor_ctl.submit_work(payload=sockout.makefile('rb'), **work_submit_kw)
+                sockin.close()
+                sockout.close()
 
-            sockin.close()
-            sockout.close()
+                self.unit_id = result['unitid']
+                # Update the job with the work unit in-memory so that the log_lifecycle
+                # will print out the work unit that is to be associated with the job in the database
+                # via the update_model() call.
+                # We want to log the work_unit_id as early as possible. A failure can happen in between
+                # when we start the job in receptor and when we associate the job <-> work_unit_id.
+                # In that case, there will be work running in receptor and Controller will not know
+                # which Job it is associated with.
+                # We do not programatically handle this case. Ideally, we would handle this with a reaper case.
+                # The two distinct job lifecycle log events below allow for us to at least detect when this
+                # edge case occurs. If the lifecycle event work_unit_id_received occurs without the
+                # work_unit_id_assigned event then this case may have occured.
+                self.task.instance.work_unit_id = result['unitid']  # Set work_unit_id in-memory only
+                self.task.instance.log_lifecycle("work_unit_id_received")
+                self.task.update_model(self.task.instance.pk, work_unit_id=result['unitid'])
+                self.task.instance.log_lifecycle("work_unit_id_assigned")
 
-            self.unit_id = result['unitid']
-            # Update the job with the work unit in-memory so that the log_lifecycle
-            # will print out the work unit that is to be associated with the job in the database
-            # via the update_model() call.
-            # We want to log the work_unit_id as early as possible. A failure can happen in between
-            # when we start the job in receptor and when we associate the job <-> work_unit_id.
-            # In that case, there will be work running in receptor and Controller will not know
-            # which Job it is associated with.
-            # We do not programatically handle this case. Ideally, we would handle this with a reaper case.
-            # The two distinct job lifecycle log events below allow for us to at least detect when this
-            # edge case occurs. If the lifecycle event work_unit_id_received occurs without the
-            # work_unit_id_assigned event then this case may have occured.
-            self.task.instance.work_unit_id = result['unitid']  # Set work_unit_id in-memory only
-            self.task.instance.log_lifecycle("work_unit_id_received")
-            self.task.update_model(self.task.instance.pk, work_unit_id=result['unitid'])
-            self.task.instance.log_lifecycle("work_unit_id_assigned")
+            # Throws an exception if the transmit failed.
+            # Will be caught by the try/except in BaseTask#run.
+            transmitter_future.result()
 
-        # Throws an exception if the transmit failed.
-        # Will be caught by the try/except in BaseTask#run.
-        transmitter_future.result()
+            # Artifacts are an output, but sometimes they are an input as well
+            # this is the case with fact cache, where clearing facts deletes a file, and this must be captured
+            artifact_dir = os.path.join(self.runner_params['private_data_dir'], 'artifacts')
+            if self.work_type != 'local' and os.path.exists(artifact_dir):
+                shutil.rmtree(artifact_dir)
 
-        # Artifacts are an output, but sometimes they are an input as well
-        # this is the case with fact cache, where clearing facts deletes a file, and this must be captured
-        artifact_dir = os.path.join(self.runner_params['private_data_dir'], 'artifacts')
-        if self.work_type != 'local' and os.path.exists(artifact_dir):
-            shutil.rmtree(artifact_dir)
+            resultsock, resultfile = receptor_ctl.get_work_results(self.unit_id, return_socket=True, return_sockfile=True)
 
-        resultsock, resultfile = receptor_ctl.get_work_results(self.unit_id, return_socket=True, return_sockfile=True)
+            connections.close_all()
 
-        connections.close_all()
-
-        # "processor" and the main thread will be separate threads.
-        # If a cancel happens, the main thread will encounter an exception, in which case
-        # we yank the socket out from underneath the processor, which will cause it to exit.
-        # The ThreadPoolExecutor context manager ensures we do not leave any threads laying around.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            processor_future = executor.submit(self.processor, resultfile)
-
-            try:
-                signal_state.raise_exception = True
-                # address race condition where SIGTERM was issued after this dispatcher task started
-                if signal_callback():
-                    raise SignalExit()
-                res = processor_future.result()
-            except SignalExit:
-                receptor_ctl.simple_command(f"work cancel {self.unit_id}")
-                resultsock.shutdown(socket.SHUT_RDWR)
-                resultfile.close()
-                result = namedtuple('result', ['status', 'rc'])
-                res = result('canceled', 1)
-            finally:
-                signal_state.raise_exception = False
-
-            if res.status == 'error':
-                # If ansible-runner ran, but an error occured at runtime, the traceback information
-                # is saved via the status_handler passed in to the processor.
-                if 'result_traceback' in self.task.runner_callback.extra_update_fields:
-                    return res
-
-                try:
-                    unit_status = receptor_ctl.simple_command(f'work status {self.unit_id}')
-                    detail = unit_status.get('Detail', None)
-                    state_name = unit_status.get('StateName', None)
-                    stdout_size = unit_status.get('StdoutSize', 0)
-                except Exception:
-                    detail = ''
-                    state_name = ''
-                    stdout_size = 0
-                    logger.exception(f'An error was encountered while getting status for work unit {self.unit_id}')
-
-                if 'exceeded quota' in detail:
-                    logger.warning(detail)
-                    log_name = self.task.instance.log_format
-                    logger.warning(f"Could not launch pod for {log_name}. Exceeded quota.")
-                    self.task.update_model(self.task.instance.pk, status='pending')
-                    return
-
-                try:
-                    receptor_output = ''
-                    if state_name == 'Failed' and self.task.runner_callback.event_ct == 0:
-                        # if receptor work unit failed and no events were emitted, work results may
-                        # contain useful information about why the job failed. In case stdout is
-                        # massive, only ask for last 1000 bytes
-                        startpos = max(stdout_size - 1000, 0)
-                        resultsock, resultfile = receptor_ctl.get_work_results(self.unit_id, startpos=startpos, return_socket=True, return_sockfile=True)
-                        lines = resultfile.readlines()
-                        receptor_output = b"".join(lines).decode()
-                    if receptor_output:
-                        self.task.runner_callback.delay_update(result_traceback=f'Worker output:\n{receptor_output}')
-                    elif detail:
-                        self.task.runner_callback.delay_update(result_traceback=f'Receptor detail:\n{detail}')
-                    else:
-                        logger.warning(f'No result details or output from {self.task.instance.log_format}, status:\n{state_name}')
-                except Exception:
-                    logger.exception(f'Work results error from job id={self.task.instance.id} work_unit={self.task.instance.work_unit_id}')
-                    raise RuntimeError(detail)
-
-        return res
+        return self.unit_id
 
     # Spawned in a thread so Receptor can start reading before we finish writing, we
     # write our payload to the left side of our socketpair.
-    @cleanup_new_process
-    def transmit(self, _socket):
-        try:
-            ansible_runner.interface.run(streamer='transmit', _output=_socket.makefile('wb'), **self.runner_params)
-        finally:
-            # Socket must be shutdown here, or the reader will hang forever.
-            _socket.shutdown(socket.SHUT_WR)
+    # @cleanup_new_process
+    # def transmit(self, _socket):
+    #     try:
+    #         ansible_runner.interface.run(streamer='transmit', _output=_socket.makefile('wb'), **self.runner_params)
+    #     finally:
+    #         # Socket must be shutdown here, or the reader will hang forever.
+    #         _socket.shutdown(socket.SHUT_WR)
 
-    @cleanup_new_process
-    def processor(self, resultfile):
-        return ansible_runner.interface.run(
-            streamer='process',
-            quiet=True,
-            _input=resultfile,
-            event_handler=self.task.runner_callback.event_handler,
-            finished_callback=self.task.runner_callback.finished_callback,
-            status_handler=self.task.runner_callback.status_handler,
-            artifacts_handler=self.task.runner_callback.artifacts_handler,
-            **self.runner_params,
-        )
+    # @cleanup_new_process
+    # def processor(self, resultfile):
+    #     return ansible_runner.interface.run(
+    #         streamer='process',
+    #         quiet=True,
+    #         _input=resultfile,
+    #         event_handler=self.task.runner_callback.event_handler,
+    #         finished_callback=self.task.runner_callback.finished_callback,
+    #         status_handler=self.task.runner_callback.status_handler,
+    #         artifacts_handler=self.task.runner_callback.artifacts_handler,
+    #         **self.runner_params,
+    #     )
 
     @property
     def receptor_params(self):

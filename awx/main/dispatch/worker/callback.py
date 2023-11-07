@@ -9,6 +9,7 @@ from django.conf import settings
 from django.utils.functional import cached_property
 from django.utils.timezone import now as tz_now
 from django.db import transaction, connection as django_connection
+from awx.main.tasks.callback import RunnerCallback
 from django_guid import set_guid
 
 import psutil
@@ -17,7 +18,7 @@ import redis
 
 from awx.main.consumers import emit_channel_notification
 from awx.main.models import JobEvent, AdHocCommandEvent, ProjectUpdateEvent, InventoryUpdateEvent, SystemJobEvent, UnifiedJob
-from awx.main.constants import ACTIVE_STATES
+from awx.main.constants import ACTIVE_STATES, JOB_FOLDER_PREFIX
 from awx.main.models.events import emit_event_detail
 from awx.main.utils.profiling import AWXProfiler
 import awx.main.analytics.subsystem_metrics as s_metrics
@@ -52,6 +53,14 @@ def job_stats_wrapup(job_identifier, event=None):
         logger.exception('Worker failed to save stats or emit notifications: Job {}'.format(job_identifier))
 
 
+class FakeConfig:
+    def __init__(self, settings):
+        self.settings = settings
+        self.command = None
+        self.cwd = None
+        self.env = None
+
+
 class CallbackBrokerWorker(BaseWorker):
     """
     A worker implementation that deserializes callback event data and persists
@@ -84,7 +93,7 @@ class CallbackBrokerWorker(BaseWorker):
         """This needs to be obtained after forking, or else it will give the parent process"""
         return os.getpid()
 
-    def read(self, queue):
+    def old_read(self, queue):
         try:
             res = self.redis.blpop(self.queue_name, timeout=1)
             if res is None:
@@ -104,6 +113,117 @@ class CallbackBrokerWorker(BaseWorker):
             self.record_read_metrics()
 
         return {'event': 'FLUSH'}
+
+    def read(self, queue):
+        from glob import glob
+        from ansible_runner.loader import ArtifactLoader
+        from ansible_runner.utils.streaming import unstream_dir
+
+        candidate_job_private_dirs = glob(f'{settings.AWX_ISOLATION_BASE_PATH}/{JOB_FOLDER_PREFIX}*/')
+
+        for private_dir in candidate_job_private_dirs:
+            self._loader = ArtifactLoader(private_dir)
+            # TODO: might need to crawl subfolders of artifacts. The subfolders will be db job primary keys
+            project_artifacts = os.path.abspath(os.path.join(private_dir, 'artifacts'))
+            job_events_path = os.path.join(self.artifact_dir, 'job_events')
+
+            rcb = RunnerCallback()
+            fake_config = FakeConfig()
+
+            while True:
+                try:
+                    line = self._input.readline()
+                    data = json.loads(line)
+                except (json.decoder.JSONDecodeError, IOError) as exc:
+                    self.status_handler(
+                        {
+                            'status': 'error',
+                            'job_explanation': (f'Failed to JSON parse a line from worker stream. Error: {exc} Line with invalid JSON data: {line[:1000]}'),
+                        },
+                        fake_config,
+                    )
+                    break
+
+                if 'status' in data:
+                    rcb.status_handler(data, fake_config)
+                elif 'zipfile' in data:
+                    length = data['zipfile']
+                    unstream_dir(self._input, length, self.artifact_dir)
+                    rcb.artifacts_handler(None)
+                elif 'eof' in data:
+                    break
+                elif data.get('event') == 'keepalive':
+                    # just ignore keepalives
+                    continue
+                else:
+                    rcb.event_handler(data)
+
+            rcb.finished_callback(None)
+
+        return self.old_read(queue)
+
+        # return self.status, self.rc
+
+        #     try:
+        #         signal_state.raise_exception = True
+        #         # address race condition where SIGTERM was issued after this dispatcher task started
+        #         if signal_callback():
+        #             raise SignalExit()
+        #         res = processor_future.result()
+        #     except SignalExit:
+        #         receptor_ctl.simple_command(f"work cancel {self.unit_id}")
+        #         resultsock.shutdown(socket.SHUT_RDWR)
+        #         resultfile.close()
+        #         result = namedtuple('result', ['status', 'rc'])
+        #         res = result('canceled', 1)
+        #     finally:
+        #         signal_state.raise_exception = False
+
+        #     if res.status == 'error':
+        #         # If ansible-runner ran, but an error occured at runtime, the traceback information
+        #         # is saved via the status_handler passed in to the processor.
+        #         if 'result_traceback' in self.task.runner_callback.extra_update_fields:
+        #             return res
+
+        #         try:
+        #             unit_status = receptor_ctl.simple_command(f'work status {self.unit_id}')
+        #             detail = unit_status.get('Detail', None)
+        #             state_name = unit_status.get('StateName', None)
+        #             stdout_size = unit_status.get('StdoutSize', 0)
+        #         except Exception:
+        #             detail = ''
+        #             state_name = ''
+        #             stdout_size = 0
+        #             logger.exception(f'An error was encountered while getting status for work unit {self.unit_id}')
+
+        #         if 'exceeded quota' in detail:
+        #             logger.warning(detail)
+        #             log_name = self.task.instance.log_format
+        #             logger.warning(f"Could not launch pod for {log_name}. Exceeded quota.")
+        #             self.task.update_model(self.task.instance.pk, status='pending')
+        #             return
+
+        #         try:
+        #             receptor_output = ''
+        #             if state_name == 'Failed' and self.task.runner_callback.event_ct == 0:
+        #                 # if receptor work unit failed and no events were emitted, work results may
+        #                 # contain useful information about why the job failed. In case stdout is
+        #                 # massive, only ask for last 1000 bytes
+        #                 startpos = max(stdout_size - 1000, 0)
+        #                 resultsock, resultfile = receptor_ctl.get_work_results(self.unit_id, startpos=startpos, return_socket=True, return_sockfile=True)
+        #                 lines = resultfile.readlines()
+        #                 receptor_output = b"".join(lines).decode()
+        #             if receptor_output:
+        #                 self.task.runner_callback.delay_update(result_traceback=f'Worker output:\n{receptor_output}')
+        #             elif detail:
+        #                 self.task.runner_callback.delay_update(result_traceback=f'Receptor detail:\n{detail}')
+        #             else:
+        #                 logger.warning(f'No result details or output from {self.task.instance.log_format}, status:\n{state_name}')
+        #         except Exception:
+        #             logger.exception(f'Work results error from job id={self.task.instance.id} work_unit={self.task.instance.work_unit_id}')
+        #             raise RuntimeError(detail)
+
+        # return res
 
     def record_read_metrics(self):
         if self.queue_pop == 0:
