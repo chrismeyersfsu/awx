@@ -13,6 +13,7 @@ from awx.api.views.root import (
     ApiV2ConfigView,
     ApiV2SubscriptionView,
     ApiV2AttachView,
+    SyncGatewayView,
 )
 from awx.api.views import (
     AuthView,
@@ -153,6 +154,7 @@ v2_urls = [
     re_path(r'^bulk/$', BulkView.as_view(), name='bulk'),
     re_path(r'^bulk/host_create/$', BulkHostCreateView.as_view(), name='bulk_host_create'),
     re_path(r'^bulk/job_launch/$', BulkJobLaunchView.as_view(), name='bulk_job_launch'),
+    re_path(r'^sync_gateway/$', SyncGatewayView.as_view(), name='sync_gateway'),
 ]
 
 

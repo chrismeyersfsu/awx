@@ -33,6 +33,9 @@ from awx.main.models import Project, Organization, Instance, InstanceGroup, JobT
 from awx.main.utils import set_environ
 from awx.main.utils.licensing import get_licenser
 
+from aap_gateway_api.models.organization import Organization as GatewayOrganization
+
+
 logger = logging.getLogger('awx.api.views.root')
 
 
@@ -372,3 +375,23 @@ class ApiV2ConfigView(APIView):
         except Exception:
             # FIX: Log
             return Response({"error": _("Failed to remove license.")}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SyncGatewayView(APIView):
+    permission_classes = (IsAuthenticated,)
+    name = _('Sync Gateway')
+    swagger_topic = 'Sync with Gateway'
+
+    def post(self, request):
+        resp = {
+            'gateway_orgs': [],
+            'controller_orgs': [],
+        }
+
+        for org in GatewayOrganization.objects.using('gateway').all():
+            resp['gateway_orgs'].append({'created_on': org.created_on, 'modified_on': org.modified_on, 'name': org.name})
+
+        for org in Organization.objects.all():
+            resp['controller_orgs'].append({'description': org.description, 'name': org.name})
+
+        return Response(resp)
