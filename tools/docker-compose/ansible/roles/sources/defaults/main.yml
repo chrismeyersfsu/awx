@@ -58,3 +58,6 @@ scrape_interval: '5s'
 enable_pgbouncer: false
 pgbouncer_port: 6432
 pgbouncer_max_pool_size: 70
+
+# pcp metrics
+enable_pcp: false

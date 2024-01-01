@@ -35,6 +35,7 @@ jsonschema
 Markdown  # used for formatting API help
 openshift
 pexpect==4.7.0 # see library notes
+pcp
 prometheus_client
 psycopg
 psutil

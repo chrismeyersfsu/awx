@@ -47,6 +47,8 @@ VAULT ?= false
 VAULT_TLS ?= false
 # If set to true docker-compose will also start a tacacs+ instance
 TACACS ?= false
+# If set to true docker-compose will also start a pcp instance
+PCP ?= false
 
 VENV_BASE ?= /var/lib/awx/venv
 
@@ -532,6 +534,7 @@ docker-compose-sources: .git/hooks/pre-commit
 	    -e enable_vault=$(VAULT) \
 	    -e vault_tls=$(VAULT_TLS) \
 	    -e enable_tacacs=$(TACACS) \
+	    -e enable_pcp=$(PCP) \
             $(EXTRA_SOURCES_ANSIBLE_OPTS)
 
 docker-compose: awx/projects docker-compose-sources

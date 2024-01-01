@@ -285,6 +285,8 @@ packaging==21.3
     #   setuptools-scm
 pbr==5.11.0
     # via -r /awx_devel/requirements/requirements.in
+pcp==5.0
+    # via -r /awx_devel/requirements/requirements.in
 pexpect==4.7.0
     # via
     #   -r /awx_devel/requirements/requirements.in

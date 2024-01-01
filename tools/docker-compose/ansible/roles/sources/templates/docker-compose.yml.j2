@@ -220,6 +220,22 @@ services:
       # pg_notify will NOT work in transaction mode.
       PGBOUNCER_POOL_MODE: session
 {% endif %}
+{% if enable_pcp|bool %}
+  pcp:
+    image: quay.io/cmeyers/awx-pcp:latest
+    container_name: tools_pcp_1
+    hostname: pcp
+    links:
+      - awx_1
+    depends_on:
+      - awx_1
+    environment:
+      AWX_USER: 'admin'
+      AWX_PASS: {{ admin_password }}
+      AWX_HOST: 'awx_1'
+      AWX_PORT: '8013'
+      AWX_PROTO: 'http'
+{% endif %}
 {% if execution_node_count|int > 0 %}
   receptor-hop:
     image: {{ receptor_image }}
