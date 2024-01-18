@@ -1,0 +1,10 @@
+services:
+  pcp:
+    image: quay.io/cmeyers/awx-pcp:latest
+    build:
+      context: ../../
+      dockerfile: pcp/Dockerfile
+    container_name: tools_pcp
+    environment:
+      - AWX_USER=${AWX_USER}
+      - AWX_PASS=${AWX_PASS}
