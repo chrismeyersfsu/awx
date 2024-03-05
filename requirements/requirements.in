@@ -34,6 +34,9 @@ JSON-log-formatter
 jsonschema
 Markdown  # used for formatting API help
 openshift
+opentelemetry-instrumentation-django
+opentelemetry-sdk
+opentelemetry.exporter.otlp
 pexpect==4.7.0  # see library notes
 prometheus_client
 psycopg

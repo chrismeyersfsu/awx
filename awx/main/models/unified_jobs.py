@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from collections import OrderedDict
 
+
 # Django
 from django.conf import settings
 from django.db import models, connection
@@ -32,12 +33,15 @@ from polymorphic.models import PolymorphicModel
 
 from ansible_base.lib.utils.models import prevent_search, get_type_for_model
 
+from opentelemetry import trace
+
 # AWX
 from awx.main.models.base import CommonModelNameNotUnique, PasswordFieldsModel, NotificationFieldsModel
 from awx.main.dispatch import get_task_queuename
 from awx.main.dispatch.control import Control as ControlDispatcher
 from awx.main.registrar import activity_stream_registrar
 from awx.main.models.mixins import ResourceMixin, TaskManagerUnifiedJobMixin, ExecutionEnvironmentMixin
+from awx.main.tracing import get_span_id
 from awx.main.utils.common import (
     camelcase_to_underscore,
     get_model_for_type,
@@ -62,6 +66,7 @@ __all__ = ['UnifiedJobTemplate', 'UnifiedJob', 'StdoutMaxBytesExceeded']
 
 logger = logging.getLogger('awx.main.models.unified_jobs')
 logger_job_lifecycle = logging.getLogger('awx.analytics.job_lifecycle')
+tracer = trace.get_tracer(settings.AWX_TRACER_API)
 # NOTE: ACTIVE_STATES moved to constants because it is used by parent modules
 
 
@@ -750,6 +755,9 @@ class UnifiedJob(
     )
     work_unit_id = models.CharField(
         max_length=255, blank=True, default=None, editable=False, null=True, help_text=_("The Receptor work unit ID associated with this job.")
+    )
+    job_lifecycle_id = models.CharField(
+        max_length=255, blank=True, default=None, editable=False, null=True, help_text=_("The most recent (last) span id of the job lifecycle while in Django.")
     )
 
     def get_absolute_url(self, request=None):
@@ -1600,6 +1608,26 @@ class UnifiedJob(
         elif state == "execution_node_chosen":
             extra["execution_node"] = self.execution_node or "NOT_SET"
         logger_job_lifecycle.info(msg, extra=extra)
+
+        def link_span():
+            span = trace.get_current_span()
+            ctx = span.get_span_context()
+            http_link = trace.Link(ctx)
+            with tracer.start_as_current_span("job_lifecycle", links=[http_link]) as span:
+                extra_ns = {f'job.{k}': v for k, v in extra.items()}
+                span.set_attributes(extra_ns)
+                # TODO: save span id on job as last_job_lifecycle_id
+                self.job_lifecycle_id = get_span_id(span)
+            self.save(update_fields=['job_lifecycle_id'])
+
+        if state == 'created':
+            link_span()
+        elif state == 'pending':
+            link_span()
+        elif state == 'waiting':
+            link_span()
+        elif state == 'running':
+            link_span()
 
     @property
     def launched_by(self):

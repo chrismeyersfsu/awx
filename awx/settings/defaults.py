@@ -1106,6 +1106,9 @@ METRICS_SUBSYSTEM_CONFIG = {
     }
 }
 
+AWX_TRACER_API = 'awx.api'
+AWX_TRACER_DISPATCHER = 'awx.dispatcher'
+
 
 # django-ansible-base
 ANSIBLE_BASE_TEAM_MODEL = 'main.Team'
