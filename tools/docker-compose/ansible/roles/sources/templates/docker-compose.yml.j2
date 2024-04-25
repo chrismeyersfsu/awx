@@ -245,6 +245,7 @@ services:
     volumes:
       - "awx_db_15:/var/lib/pgsql/data"
     networks:
+      - service-mesh
       - awx
     ports:
        - "${AWX_PG_PORT:-5441}:5432"
