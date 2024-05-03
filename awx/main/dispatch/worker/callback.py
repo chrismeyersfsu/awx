@@ -4,6 +4,11 @@ import os
 import signal
 import time
 import datetime
+import websocket
+from websocket import create_connection
+import queue
+from threading import Thread
+
 
 from django.conf import settings
 from django.utils.functional import cached_property
@@ -52,6 +57,61 @@ def job_stats_wrapup(job_identifier, event=None):
         logger.exception('Worker failed to save stats or emit notifications: Job {}'.format(job_identifier))
 
 
+class WebsocketClient(websocket.WebSocketApp):
+    def __init__(self, *args, start=True, **kwargs):
+        import collections
+
+        super().__init__(*args, on_open=self.on_open, **kwargs)
+        self._queue = queue.Queue()
+        self._queue_thread = None
+        self._listen_thread = None
+        self._ws = None  # gets set in on_open
+
+        if start:
+            self.start()
+
+    def start(self):
+        # TODO: cmeyers, daemon so that if other threads in the process die and this is the last one, also die
+        # Note that this a quick death & there won't be time to cleanup
+        # consider adding a nice shutdown path from a signal sent by the parent.
+        self._listen_thread = Thread(target=self.run_forever, daemon=True)
+        self._listen_thread.start()
+        return True
+
+    def on_message(self, ws, message):
+        # TODO: cmeyers, this should never be called.
+        print(f"No data should flow in this direction {message}")
+
+    def on_open(self, ws):  # TODO: maybe *ws ?
+        print("WebsocketClient::on_open() called")
+        self._ws = ws
+        self._queue_thread = Thread(target=self.process_queue_loop, args=(self._queue,), daemon=True)
+        self._queue_thread.start()
+
+    def process_queue_loop(self, q):
+        print("WebsocketClient::process_queue_loop() Called")
+        while True:
+            if not self._ws:
+                print("WebsocketClient::process_queue_loop() ws client not connected yet")
+                time.sleep(1)
+                continue
+            try:
+                payload = q.get_nowait()
+            except queue.Empty:
+                time.sleep(1)
+                continue
+            print(f"WebsocketClient::process_queue_loop() Actually sending {payload}")
+            self._ws.send(payload)
+
+    def broadcast(self, group, msg):
+        # print("WebsocketClient::broadcast() Called")
+        from awx.main import consumers
+
+        payload = consumers._dump_payload({'group': group, 'message': msg})
+        # print(f"WebSocketClient::broadcast() submitting payload {payload}")
+        self._queue.put(payload)
+
+
 class CallbackBrokerWorker(BaseWorker):
     """
     A worker implementation that deserializes callback event data and persists
@@ -76,8 +136,14 @@ class CallbackBrokerWorker(BaseWorker):
         self.queue_pop = 0
         self.queue_name = settings.CALLBACK_QUEUE
         self.prof = AWXProfiler("CallbackBrokerWorker")
+        self.ws = None
+
         for key in self.redis.keys('awx_callback_receiver_statistics_*'):
             self.redis.delete(key)
+
+    def send_ws_msg(self, group, msg):
+        # print(f"CallbackBrokerWorker::send_ws_msg() Wanting to emit event to group {group}")
+        self.ws.broadcast(group, msg)
 
     @cached_property
     def pid(self):
@@ -140,6 +206,7 @@ class CallbackBrokerWorker(BaseWorker):
             logger.error(f'profiling is disabled, wrote {filepath}')
 
     def work_loop(self, *args, **kw):
+        self.ws = WebsocketClient("ws://localhost:8051/websocket/relay/")
         if settings.AWX_CALLBACK_PROFILE:
             signal.signal(signal.SIGUSR1, self.toggle_profiling)
         return super(CallbackBrokerWorker, self).work_loop(*args, **kw)
@@ -206,7 +273,7 @@ class CallbackBrokerWorker(BaseWorker):
                 for e in saved_events:
                     if not getattr(e, '_skip_websocket_message', False):
                         metrics_events_broadcast += 1
-                        emit_event_detail(e)
+                        emit_event_detail(e, self.send_ws_msg)
                     if getattr(e, '_notification_trigger_event', False):
                         job_stats_wrapup(getattr(e, e.JOB_REFERENCE), event=e)
             self.last_flush = time.time()
@@ -252,7 +319,7 @@ class CallbackBrokerWorker(BaseWorker):
                         # closed. don't actually persist them to the database; we
                         # just use them to report `summary` websocket events as an
                         # approximation for when a job is "done"
-                        emit_channel_notification('jobs-summary', dict(group_name='jobs', unified_job_id=job_identifier, final_counter=final_counter))
+                        self.send_ws_msg('jobs-summary', dict(group_name='jobs', unified_job_id=job_identifier, final_counter=final_counter))
 
                         if notification_trigger_event:
                             job_stats_wrapup(job_identifier)

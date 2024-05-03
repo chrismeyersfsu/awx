@@ -50,7 +50,10 @@ RUN dnf -y update && dnf install -y 'dnf-command(config-manager)' && \
     swig \
     unzip \
     xmlsec1-devel \
-    xmlsec1-openssl-devel
+    xmlsec1-openssl-devel \
+    cmake \
+    libuv-devel \
+    zlib-devel
 
 RUN pip3.11 install -vv build
 

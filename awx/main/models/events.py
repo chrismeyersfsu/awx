@@ -60,7 +60,7 @@ def create_host_status_counts(event_data):
     return dict(host_status_counts)
 
 
-def emit_event_detail(event):
+def emit_event_detail(event, callback):
     if settings.UI_LIVE_UPDATES_ENABLED is False and event.event not in MINIMAL_EVENTS:
         return
     cls = event.__class__
@@ -78,7 +78,7 @@ def emit_event_detail(event):
         url = '/api/v2/ad_hoc_command_events/{}'.format(event.id)
     group = camelcase_to_underscore(cls.__name__) + 's'
     timestamp = event.created.isoformat()
-    consumers.emit_channel_notification(
+    callback(
         '-'.join([group, str(getattr(event, relation))]),
         {
             'id': event.id,

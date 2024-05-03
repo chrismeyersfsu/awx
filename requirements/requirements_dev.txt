@@ -30,3 +30,6 @@ pip>=21.3 # PEP 660 – Editable installs for pyproject.toml based builds (wheel
 debugpy
 remote-pdb
 sdb
+
+# move to requirements.in if this merges. Lives here to conflict less on git merge.
+socketify

@@ -231,7 +231,9 @@ daphne:
 	@if [ "$(VENV_BASE)" ]; then \
 		. $(VENV_BASE)/awx/bin/activate; \
 	fi; \
-	daphne -b 127.0.0.1 -p 8051 awx.asgi:channel_layer
+	#daphne -b 127.0.0.1 -p 8051 awx.asgi:channel_layer
+	#$(PYTHON) manage.py run_websockets --port 8051
+	sleep 99999
 
 ## Run to start the background task dispatcher for development.
 dispatcher:
