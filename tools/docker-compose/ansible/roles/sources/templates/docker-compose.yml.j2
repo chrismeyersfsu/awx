@@ -100,6 +100,7 @@ services:
 {% endif %}
   redis_{{ container_postfix }}:
     image: redis:latest
+    user: root
     container_name: tools_redis_{{ container_postfix }}
     volumes:
       - "../../redis/redis.conf:/usr/local/etc/redis/redis.conf:Z"
@@ -229,6 +230,7 @@ services:
   #     context: ../../docker-compose
   #     dockerfile: Dockerfile-logstash
   postgres:
+    user: postgres
     image: quay.io/sclorg/postgresql-15-c9s
     container_name: tools_postgres_1
     # additional logging settings for postgres can be found https://www.postgresql.org/docs/current/runtime-config-logging.html
