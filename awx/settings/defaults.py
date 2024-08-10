@@ -870,7 +870,6 @@ LOGGING = {
         'simple': {'format': '%(asctime)s %(levelname)-8s [%(guid)s] %(name)s %(message)s'},
         'json': {'()': 'awx.main.utils.formatters.LogstashFormatter'},
         'timed_import': {'()': 'awx.main.utils.formatters.TimeFormatter', 'format': '%(relativeSeconds)9.3f %(levelname)-8s %(message)s'},
-        'dispatcher': {'format': '%(asctime)s %(levelname)-8s [%(guid)s] %(name)s PID:%(process)d %(message)s'},
     },
     # Extended below based on install scenario. You probably don't want to add something directly here.
     # See 'handler_config' below.
@@ -891,7 +890,6 @@ LOGGING = {
             'address': '/var/run/awx-rsyslog/rsyslog.sock',
             'filters': ['external_log_enabled', 'dynamic_level_filter', 'guid'],
         },
-        'otel': {'class': 'logging.NullHandler'},
     },
     'loggers': {
         'django': {'handlers': ['console']},
@@ -936,7 +934,7 @@ LOGGING = {
 handler_config = {
     'tower_warnings': {'filename': 'tower.log'},
     'callback_receiver': {'filename': 'callback_receiver.log'},
-    'dispatcher': {'filename': 'dispatcher.log', 'formatter': 'dispatcher'},
+    'dispatcher': {'filename': 'dispatcher.log'},
     'wsrelay': {'filename': 'wsrelay.log'},
     'task_system': {'filename': 'task_system.log'},
     'rbac_migrations': {'filename': 'tower_rbac_migrations.log'},
@@ -948,19 +946,20 @@ handler_config = {
 
 # If running on a VM, we log to files. When running in a container, we log to stdout.
 logging_mode = os.getenv('AWX_LOGGING_MODE', 'file')
-if logging_mode not in ('file', 'stdout'):
-    raise Exception("AWX_LOGGING_MODE must be 'file' or 'stdout'")
+if logging_mode not in ('file', 'stdout', 'stdout-otlp'):
+    raise Exception("AWX_LOGGING_MODE must be 'file' or 'stdout' or 'stdout-otlp'")
 
 for name, config in handler_config.items():
     # Common log handler config. Don't define a level here, it's set by settings.LOG_AGGREGATOR_LEVEL
-    LOGGING['handlers'][name] = {'filters': ['dynamic_level_filter', 'guid'], 'formatter': config.get('formatter', 'simple')}
+    LOGGING['handlers'][name] = {
+        'filters': ['dynamic_level_filter', 'guid'],
+        'formatter': config.get('formatter', 'simple'),
+        'class': 'logging.NullHandler',  # logging_mode == 'stdout'
+    }
 
     if logging_mode == 'file':
         LOGGING['handlers'][name]['class'] = 'logging.handlers.WatchedFileHandler'
         LOGGING['handlers'][name]['filename'] = os.path.join(LOG_ROOT, config['filename'])
-
-    if logging_mode == 'stdout':
-        LOGGING['handlers'][name]['class'] = 'logging.NullHandler'
 
 # Prevents logging to stdout on traditional VM installs
 if logging_mode == 'file':

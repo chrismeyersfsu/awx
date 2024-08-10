@@ -3,11 +3,14 @@
 
 # Python
 import base64
+import json
 import logging
 import sys
 import traceback
 import os
 from datetime import datetime
+import typing
+from enum import Enum
 
 # Django
 from django.conf import settings
@@ -18,12 +21,19 @@ from django.utils.encoding import force_str
 from awx.main.exceptions import PostRunError
 
 # OTEL
-from opentelemetry._logs import set_logger_provider
+from awx.main.utils.formatters import JSONNLFormatter
+from opentelemetry._logs import set_logger_provider, get_logger_provider
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter as OTLPGrpcLogExporter
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter as OTLPHttpLogExporter
 
-from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
+
+from opentelemetry.proto.logs.v1.logs_pb2 import (
+    ResourceLogs,
+)
+
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler, LogData
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogExporter, LogExportResult, SimpleLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 
 
@@ -146,16 +156,9 @@ else:
     ColorHandler = logging.StreamHandler
 
 
-class OTLPHandler(LoggingHandler):
-    def __init__(self, endpoint=None, protocol='grpc', service_name=None, instance_id=None, auth=None, username=None, password=None):
-        if not endpoint:
-            raise ValueError("endpoint required")
-
-        if auth == 'basic' and (username is None or password is None):
-            raise ValueError("auth type basic requires username and passsword parameters")
-
-        self.endpoint = endpoint
-        self.service_name = service_name or (sys.argv[1] if len(sys.argv) > 1 else (sys.argv[0] or 'unknown_service'))
+class BaseOTLPHandler(LoggingHandler):
+    def __init__(self, service_name=None, instance_id=None):
+        self.service_name = service_name or self.generate_service_name()
         self.instance_id = instance_id or os.uname().nodename
 
         logger_provider = LoggerProvider(
@@ -168,6 +171,32 @@ class OTLPHandler(LoggingHandler):
         )
         set_logger_provider(logger_provider)
 
+        # trace_provider = TracerProvider()
+
+        super().__init__(level=logging.NOTSET, logger_provider=logger_provider)
+
+    def get_service_name(self):
+        self.service_name
+
+    def generate_service_name(self):
+        return sys.argv[1] if len(sys.argv) > 1 else (sys.argv[0] or 'unknown_service')
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Calls provider exporters.export()
+        return super().emit(record)
+
+
+class OTLPHandler(BaseOTLPHandler):
+    def __init__(self, endpoint=None, protocol='grpc', service_name=None, instance_id=None, auth=None, username=None, password=None):
+        super(BaseOTLPHandler, self).__init__(service_name=None, instance_id=None)
+        if not endpoint:
+            raise ValueError("endpoint required")
+
+        if auth == 'basic' and (username is None or password is None):
+            raise ValueError("auth type basic requires username and passsword parameters")
+
+        self.endpoint = endpoint
+
         headers = {}
         if auth == 'basic':
             secret = f'{username}:{password}'
@@ -177,6 +206,48 @@ class OTLPHandler(LoggingHandler):
             otlp_exporter = OTLPGrpcLogExporter(endpoint=self.endpoint, insecure=True, headers=headers)
         elif protocol == 'http':
             otlp_exporter = OTLPHttpLogExporter(endpoint=self.endpoint, headers=headers)
-        logger_provider.add_log_record_processor(BatchLogRecordProcessor(otlp_exporter))
 
-        super().__init__(level=logging.NOTSET, logger_provider=logger_provider)
+        get_logger_provider().add_log_record_processor(BatchLogRecordProcessor(otlp_exporter))
+
+
+class ExporterHandlerAdapter(LogExporter):
+    # python handler
+    #   opentelemetry processor
+    #     opentelemetry exporter.export()
+    #       python handler.emit()
+    def __init__(self, handler):
+        self._handler = handler
+        super().__init__()
+
+    def _translate_data(self, data: typing.Sequence[LogData]) -> typing.List[ResourceLogs]:
+        return encode_logs(data)
+
+    def export(self, batch: typing.Sequence[LogData]) -> LogExportResult:
+        self._handler.emit(self._translate_data(batch))  # this is the magic
+        return LogExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        pass
+
+
+class AWXOTLPHandler(BaseOTLPHandler):
+    def __init__(self, handler: logging.Handler, service_name=None, instance_id=None):
+        super().__init__(service_name=service_name, instance_id=instance_id)
+
+        get_logger_provider().add_log_record_processor(SimpleLogRecordProcessor(ExporterHandlerAdapter(handler)))
+
+
+class AWXOTLPWatchedFileHandler(AWXOTLPHandler):
+    def __init__(self, directory, instance_id=None):
+        service_name = self.generate_service_name()
+        filename = f'{service_name}.log'
+        handler = logging.handlers.WatchedFileHandler(os.path.join(directory, filename))
+        handler.setFormatter(JSONNLFormatter())
+        super().__init__(handler, service_name=service_name)
+
+
+class AWXOTLPStreamHandler(AWXOTLPHandler):
+    def __init__(self):
+        handler = logging.StreamHandler()
+        handler.setFormatter(JSONNLFormatter())
+        super().__init__(handler)

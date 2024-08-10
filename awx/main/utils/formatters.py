@@ -1,6 +1,7 @@
 # Copyright (c) 2017 Ansible Tower by Red Hat
 # All Rights Reserved.
 
+import base64
 from copy import copy
 import json
 import logging
@@ -12,6 +13,8 @@ from dateutil.tz import tzutc
 from django.utils.timezone import now
 from django.core.serializers.json import DjangoJSONEncoder
 from django.conf import settings
+
+from google.protobuf import json_format
 
 
 class TimeFormatter(logging.Formatter):
@@ -272,8 +275,23 @@ class LogstashFormatter(LogstashFormatterBase):
         if record.exc_info:
             message.update(self.get_debug_fields(record))
 
-        if settings.LOG_AGGREGATOR_TYPE == 'splunk':
+        if getattr(settings, 'LOG_AGGREGATOR_TYPE', None) == 'splunk':
             # splunk messages must have a top level "event" key when using the /services/collector/event receiver.
             # The event receiver wont scan an event for a timestamp field therefore a time field must also be supplied containing epoch timestamp
             message = {'time': record.created, 'event': message}
         return self.serialize(message)
+
+
+class JSONNLFormatter(logging.Formatter):
+    """
+    opentelemetry.proto.collector.logs.v1.logs_service_pb2.ExportLogsServiceRequest --> json
+    """
+
+    def format(self, record):
+        data = json_format.MessageToDict(record)
+        d = data['resourceLogs'][0]['scopeLogs'][0]['logRecords'][0]
+        if 'traceId' in d:
+            d['traceId'] = base64.b64decode(d['traceId']).hex()
+        if 'spanId' in d:
+            d['spanId'] = base64.b64decode(d['spanId']).hex()
+        return json.dumps(data)

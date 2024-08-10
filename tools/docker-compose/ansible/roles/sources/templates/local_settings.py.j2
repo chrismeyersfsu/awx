@@ -47,9 +47,9 @@ OPTIONAL_API_URLPATTERN_PREFIX = '{{ api_urlpattern_prefix }}'
 # LOGGING['loggers']['django_auth_ldap']['level'] = 'DEBUG'
 
 {% if enable_otel|bool %}
-LOGGING['handlers']['otel'] |= {
-    'class': 'awx.main.utils.handlers.OTLPHandler',
-    'endpoint': 'http://otel:4317',
+from awx.main.handlers import HandlerType
+LOGGING['handlers']['otel'] = {
+    'class': 'awx.main.utils.handlers.AWXOTLPHandler'
 }
 # Add otel log handler to all log handlers where propagate is False
 for name in LOGGING['loggers'].keys():
