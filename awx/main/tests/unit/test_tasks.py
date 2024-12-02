@@ -34,7 +34,7 @@ from awx.main.models import (
     User,
     build_safe_env,
 )
-from awx.main.models.credential import HIDDEN_PASSWORD, ManagedCredentialType
+from awx.main.models.credential import ManagedCredentialType
 
 from awx.main.tasks import jobs, system, receptor
 from awx.main.utils import encrypt_field, encrypt_value
@@ -42,6 +42,8 @@ from awx.main.utils.safe_yaml import SafeLoader
 
 from awx.main.utils.licensing import Licenser
 from awx.main.constants import JOB_VARIABLE_PREFIXES
+
+from awx_plugins.interfaces._temporary_private_credential_api import HIDDEN_PASSWORD
 
 from receptorctl.socket_interface import ReceptorControl
 

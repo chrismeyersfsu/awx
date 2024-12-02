@@ -64,28 +64,6 @@ __all__ = ['Credential', 'CredentialType', 'CredentialInputSource', 'build_safe_
 logger = logging.getLogger('awx.main.models.credential')
 credential_plugins = {entry_point.name: entry_point.load() for entry_point in entry_points(group='awx_plugins.credentials')}
 
-HIDDEN_PASSWORD = '**********'
-
-
-def build_safe_env(env):
-    """
-    Build environment dictionary, hiding potentially sensitive information
-    such as passwords or keys.
-    """
-    hidden_re = re.compile(r'API|TOKEN|KEY|SECRET|PASS', re.I)
-    urlpass_re = re.compile(r'^.*?://[^:]+:(.*?)@.*?$')
-    safe_env = dict(env)
-    for k, v in safe_env.items():
-        if k == 'AWS_ACCESS_KEY_ID':
-            continue
-        elif k.startswith('ANSIBLE_') and not k.startswith('ANSIBLE_NET') and not k.startswith('ANSIBLE_GALAXY_SERVER'):
-            continue
-        elif hidden_re.search(k):
-            safe_env[k] = HIDDEN_PASSWORD
-        elif type(v) == str and urlpass_re.match(v):
-            safe_env[k] = urlpass_re.sub(HIDDEN_PASSWORD, v)
-    return safe_env
-
 
 def check_resource_server_for_user_in_organization(user, organization, requesting_user):
     if not resource_server_defined():
