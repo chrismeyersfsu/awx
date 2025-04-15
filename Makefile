@@ -518,7 +518,7 @@ docker-compose: awx/projects docker-compose-sources
 	$(MAKE) docker-compose-up
 
 docker-compose-up:
-	$(DOCKER_COMPOSE) -f tools/docker-compose/_sources/docker-compose.yml $(COMPOSE_OPTS) up $(COMPOSE_UP_OPTS) --remove-orphans
+	$(DOCKER_COMPOSE) -f $(PWD)/tools/docker-compose/_sources/docker-compose.yml $(COMPOSE_OPTS) up $(COMPOSE_UP_OPTS) --remove-orphans
 
 docker-compose-down:
 	$(DOCKER_COMPOSE) -f tools/docker-compose/_sources/docker-compose.yml $(COMPOSE_OPTS) down --remove-orphans
@@ -561,7 +561,7 @@ Dockerfile.dev: tools/ansible/roles/dockerfile/templates/Dockerfile.j2
 
 ## Build awx_devel image for docker compose development environment
 docker-compose-build: Dockerfile.dev
-	DOCKER_BUILDKIT=1 docker build \
+	DOCKER_BUILDKIT=1 podman build \
 		--ssh default=$(SSH_AUTH_SOCK) \
 		-f Dockerfile.dev \
 		-t $(DEVEL_IMAGE_NAME) \

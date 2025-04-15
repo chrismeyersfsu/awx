@@ -12,7 +12,6 @@ services:
     environment:
       RUN_MIGRATIONS: 1
     volumes:
-      - "../../../:/awx_devel"
 {% for editable_dependency in editable_dependencies %}
       - "{{ editable_dependency }}:/editable_dependencies/{{ editable_dependency | basename }}"
 {% endfor %}
@@ -24,7 +23,6 @@ services:
   {% set awx_sdb_port_end = 7999 + (loop.index0*1000) | int %}
   # Primary AWX Development Container
   awx_{{ container_postfix }}:
-    user: "{{ ansible_user_uid }}"
     image: "{{ awx_image }}:{{ awx_image_tag }}"
     container_name: tools_awx_{{ container_postfix }}
     hostname: awx-{{ container_postfix }}
@@ -42,6 +40,7 @@ services:
       DJANGO_SUPERUSER_PASSWORD: {{ admin_password }}
       UWSGI_MOUNT_PATH: {{ ingress_path }}
       DJANGO_COLORS: "${DJANGO_COLORS:-}"
+      STORAGE_DRIVER: overlay
 {% if loop.index == 1 %}
       RUN_MIGRATIONS: 1
 {% endif %}
@@ -189,7 +188,7 @@ services:
       POSTGRESQL_DATABASE: {{ pg_database }}
       POSTGRESQL_PASSWORD: {{ pg_password }}
     volumes:
-      - "awx_db_15:/var/lib/pgsql/data"
+      - "awx_db_15:/var/lib/pgsql/data:Z"
 {% if pg_tls|bool %}
       - "../../docker-compose/pgssl.conf:/opt/app-root/src/postgresql-cfg/pgssl.conf"
 {% endif %}
