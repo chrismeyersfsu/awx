@@ -13,6 +13,7 @@ import django  # NOQA
 from django.conf import settings  # NOQA
 from django.urls import resolve  # NOQA
 from django.core.wsgi import get_wsgi_application  # NOQA
+from ansible_observe.opentelemetry.instrument import setup_tracing  # NOQA
 
 """
 WSGI config for AWX project.
@@ -37,4 +38,5 @@ if MODE == 'production':
 
 
 # Return the default Django WSGI application.
+setup_tracing(service_name="aap-controller")
 application = get_wsgi_application()
