@@ -14,6 +14,7 @@ Cython
 daphne
 distro
 django>=5.2,<5.3  # Django 5.2 LTS, allow patch updates
+django-ansible-observability>=0.1.8
 django-cors-headers
 django-crum
 django-extensions
