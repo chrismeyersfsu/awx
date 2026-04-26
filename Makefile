@@ -353,7 +353,8 @@ black: reports
 	@(set -o pipefail && $@ $(BLACK_ARGS) awx awxkit awx_collection | tee reports/$@.report)
 
 $(GIT_COMMON_DIR)/hooks/pre-commit:
-	ln -sf ../../pre-commit.sh $(GIT_COMMON_DIR)/hooks/pre-commit
+	cp pre-commit.sh $(GIT_COMMON_DIR)/hooks/pre-commit
+	chmod +x $(GIT_COMMON_DIR)/hooks/pre-commit
 
 pre-commit: $(GIT_COMMON_DIR)/hooks/pre-commit
 
