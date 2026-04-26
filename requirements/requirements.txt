@@ -100,6 +100,8 @@ click==8.1.8
     # via receptorctl
 constantly==23.10.4
     # via twisted
+coverage==7.13.5
+    # via -r /awx_devel/requirements/requirements.in
 cryptography==46.0.3
     # via
     #   -r /awx_devel/requirements/requirements.in

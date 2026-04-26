@@ -883,7 +883,10 @@ RECEPTOR_KEEP_WORK_ON_ERROR = False
 # K8S only. Use receptor_log_level on AWX spec to set this properly
 RECEPTOR_LOG_LEVEL = 'info'
 
+TEST_COVERAGE_OUTPUT_DIR = os.environ.get('TEST_COVERAGE_OUTPUT_DIR', '/tmp/awx-coverage')
+
 MIDDLEWARE = [
+    'awx.coverage_middleware.CoverageMiddleware',
     'django_guid.middleware.guid_middleware',
     'ansible_base.lib.middleware.logging.log_request.LogTracebackMiddleware',
     'awx.main.middleware.SettingsCacheMiddleware',

@@ -9,6 +9,7 @@ botocore
 cachetools  # Used by awx/conf/settings.py for TTLCache
 channels
 channels-redis
+coverage
 cryptography
 Cython
 daphne
