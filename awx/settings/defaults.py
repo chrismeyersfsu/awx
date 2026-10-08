@@ -427,6 +427,11 @@ RECEPTOR_SERVICE_ADVERTISEMENT_PERIOD = 60  # https://github.com/ansible/recepto
 # (_attempt_adoption_for_dispatched_jobs). This timeout is the maximum time we wait for
 # the EE to finish before giving up and failing the job.
 HADR_JOB_ADOPTION_TIMEOUT = 3600
+
+# Test facility: lets tests inject faults at named failpoints (awx.main.utils.failpoints).
+# Inert until a failpoint is armed, but never enable it in production.
+AWX_FAILPOINTS_ENABLED = False
+
 EXECUTION_NODE_REMEDIATION_CHECKS = 60 * 30  # once every 30 minutes check if an execution node errors have been resolved
 
 # Amount of time dispatcher will try to reconnect to database for jobs and consuming new work

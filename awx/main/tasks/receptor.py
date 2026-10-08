@@ -29,6 +29,7 @@ from dispatcherd.publish import task
 
 # AWX
 from awx.main.utils.execution_environments import get_default_pod_spec
+from awx.main.utils.failpoints import failpoint
 from awx.main.exceptions import ReceptorNodeNotFound
 from awx.main.utils.common import (
     deepmerge,
@@ -513,6 +514,7 @@ class AWXReceptorJob:
             # work_unit_id_assigned event then this case may have occured.
             self.task.instance.work_unit_id = result['unitid']  # Set work_unit_id in-memory only
             self.task.instance.log_lifecycle("work_unit_id_received")
+            failpoint('job.after_submit_before_unit_saved', job_id=self.task.instance.pk, unit_id=result['unitid'])
             self.task.update_model(self.task.instance.pk, work_unit_id=result['unitid'])
             self.task.instance.log_lifecycle("work_unit_id_assigned")
 
@@ -541,6 +543,7 @@ class AWXReceptorJob:
             logger.exception(f'Failed to get work results for unit {self.unit_id}')
             raise
 
+        failpoint('job.stream_started', job_id=self.task.instance.pk, unit_id=self.unit_id)
         connections.close_all()
 
         # "processor" and the main thread will be separate threads.
@@ -980,6 +983,7 @@ def reattach_to_work_unit(job, receptor_ctl):
 
     # Check state for logging — no longer a gate. We stream regardless.
     try:
+        failpoint('adoption.unit_status', job_id=job.id, unit_id=unit_id)
         unit_status = receptor_ctl.simple_command(f'work status {unit_id}')
     except Exception:
         logger.warning(f'Cannot get receptor status for work unit {unit_id} (job {job.id}), deferring adoption')
@@ -994,6 +998,7 @@ def reattach_to_work_unit(job, receptor_ctl):
         return False
 
     safe_threshold, collision_zone = _compute_adoption_dedup(job)
+    failpoint('adoption.after_snapshot', job_id=job.id, safe_threshold=safe_threshold, persisted=len(collision_zone))
     max_counter = max(collision_zone) if collision_zone else safe_threshold
     logger.info(
         f'Job {job.id}: safe_threshold={safe_threshold} collision_zone_size={len(collision_zone)} '
@@ -1023,6 +1028,7 @@ def reattach_to_work_unit(job, receptor_ctl):
     # _process_phase -> _handle_work_error may return None for 'exceeded quota' where
     # the job is already set to 'pending' — don't finalize, let the next dispatch handle it.
     try:
+        failpoint('adoption.before_finalize', job_id=job.id)
         if res is not None:
             exit_code = 0 if getattr(res, 'status', '') == 'successful' else 1
             _finalize_adopted_job(job, callback, exit_code, process_phase_failed)
@@ -1040,6 +1046,7 @@ def reattach_to_work_unit(job, receptor_ctl):
             exit_code = _get_adoption_exit_code(unit_status, state_name)
             _finalize_adopted_job(job, callback, exit_code, process_phase_failed)
     finally:
+        failpoint('adoption.after_finalize_before_release', job_id=job.id, finalized=None)
         receptor_job._receptor_release_work(receptor_ctl, getattr(res, 'status', 'error'))
         shutil.rmtree(private_data_dir, ignore_errors=True)
 

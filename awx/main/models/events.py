@@ -24,6 +24,7 @@ from awx.main.managers import DeferJobCreatedManager
 from awx.main.constants import MINIMAL_EVENTS
 from awx.main.models.base import CreatedModifiedModel
 from awx.main.utils import ignore_inventory_computed_fields, camelcase_to_underscore
+from awx.main.utils.failpoints import failpoint
 
 analytics_logger = logging.getLogger('awx.analytics.job_events')
 
@@ -587,6 +588,7 @@ class JobEvent(BasePlaybookEvent):
                 else:
                     logger.warning(f'host {host.lower()} is dark / unreachable, not marking it as updated')
 
+            failpoint('events.stats_before_insert', job_id=job.id, new=len(summaries), existing=0)
             JobHostSummary.objects.bulk_create(summaries.values())
 
             # Create/update Host Metrics
