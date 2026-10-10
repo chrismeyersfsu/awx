@@ -590,6 +590,7 @@ class JobEvent(BasePlaybookEvent):
 
             failpoint('events.stats_before_insert', job_id=job.id, new=len(summaries), existing=0)
             JobHostSummary.objects.bulk_create(summaries.values())
+            failpoint('events.stats_after_insert', job_id=job.id, new=len(summaries), metric_hosts=len(updated_hosts_list))
 
             # Create/update Host Metrics
             self._update_host_metrics(updated_hosts_list)
