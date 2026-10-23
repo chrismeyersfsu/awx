@@ -1,8 +1,8 @@
 """
-What must hold for AWX no matter how its shared state drifted from Jewel's.
+Checks of AWX's state that tests use to describe what a sync, a login or an API call did.
 
-Each check returns a list of human readable problems, empty when the invariant holds, so a
-failing test shows every problem at once.
+Each check returns a list of human readable problems, empty when the check holds, so a test can
+assert the exact problems it expects and a failure shows every one at once.
 """
 
 import json
@@ -19,13 +19,6 @@ from awx.main.models.rbac import ROLE_DEFINITION_TO_ROLE_FIELD
 from .fake_jewel import TRACKED_TYPES
 
 AWX_ONLY_MODELS = (Inventory, Project, JobTemplate, Credential)
-
-
-def server_errors(response):
-    """C1: a drifted state is answered with a 4xx, never a 500"""
-    if response.status_code >= 500:
-        return [f"{response.status_code} from {response.request['REQUEST_METHOD']} {response.request['PATH_INFO']}"]
-    return []
 
 
 def old_rbac_mismatches():
