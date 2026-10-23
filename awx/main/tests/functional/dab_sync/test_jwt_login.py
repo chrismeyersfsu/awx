@@ -36,3 +36,19 @@ def test_login_in_sync(world, jewel, api):
     assert response.status_code == 200, response.content
     assert response.json()["results"][0]["id"] == world.alice.pk
     assert RoleUserAssignment.objects.filter(user=world.alice, role_definition__name="Team Member", object_id=world.team.pk).exists()
+
+
+@pytest.mark.django_db
+def test_reused_username_does_not_inherit_previous_user(world, jewel, api):
+    """J4: bob is deleted in Jewel and a different person signs up as bob, they must not get old bob's AWX roles and data"""
+    new_bob = jewel.replace_user(jewel.find("shared.user", username="bob"))
+
+    me = api.get("/api/v2/me/", **jewel.jwt_headers(new_bob))
+    inventory = api.get(f"/api/v2/inventories/{world.inventory.pk}/", **jewel.jwt_headers(new_bob))
+
+    problems = server_errors(me) + server_errors(inventory)
+    if me.status_code == 200 and me.json()["results"][0]["id"] == world.bob.pk:
+        problems.append(f"the new bob is logged in as the old bob's user, pk={world.bob.pk}")
+    if inventory.status_code == 200:
+        problems.append("the new bob can see inv1 through the old bob's Inventory Use role")
+    assert not problems, "\n".join(problems)

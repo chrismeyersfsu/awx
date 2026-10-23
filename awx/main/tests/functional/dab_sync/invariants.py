@@ -88,6 +88,8 @@ def sync_differences(jewel):
         data = json.loads(json.dumps(local.content_type.resource_type.serializer_class(local.content_object).data))
         if data != fake.resource_data:
             problems.append(f"{fake.resource_type} {aid} differs: AWX {data}, Jewel {fake.resource_data}")
+        if str(local.service_id) != fake.service_id:
+            problems.append(f"{fake.resource_type} {fake.natural_key()} is owned by {local.service_id} in AWX, by Jewel {fake.service_id} there")
     for local in Resource.objects.filter(content_type__resource_type__name__in=TRACKED_TYPES).exclude(ansible_id__in=list(jewel.resources)):
         problems.append(f"{local.content_type.resource_type.name} {local.name} {local.ansible_id} (service_id {local.service_id}) is only in AWX")
 

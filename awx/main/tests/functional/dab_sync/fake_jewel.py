@@ -139,6 +139,14 @@ class FakeJewel:
             raise LookupError(f"expected one {resource_type} matching {natural_key}, found {len(matches)}")
         return matches[0]
 
+    def replace_user(self, ansible_id):
+        """Delete a user in Jewel and register a different person under the same username, returning the new ansible_id"""
+        old = self.resources.pop(ansible_id)
+        self.assignments = {a for a in self.assignments if ansible_id not in (a.actor_ansible_id, a.ansible_id_or_pk)}
+        new_id = str(uuid.uuid4())
+        self.resources[new_id] = FakeResource("shared.user", self.service_id, dict(old.resource_data, first_name="Someone", last_name="Else"))
+        return new_id
+
     def fail(self, method, path_glob, status=None, body=None, exc=None, times=None):
         """Answer matching requests with an error status and body, or raise exc (like requests.ConnectionError)"""
         self.failures.append(Failure(method, path_glob, status, body, exc, times))
