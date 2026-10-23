@@ -139,6 +139,12 @@ class FakeJewel:
             raise LookupError(f"expected one {resource_type} matching {natural_key}, found {len(matches)}")
         return matches[0]
 
+    def add(self, resource_type, **resource_data):
+        """Create a resource only Jewel has, returning its ansible_id"""
+        ansible_id = str(uuid.uuid4())
+        self.resources[ansible_id] = FakeResource(resource_type, self.service_id, resource_data)
+        return ansible_id
+
     def replace_user(self, ansible_id):
         """Delete a user in Jewel and register a different person under the same username, returning the new ansible_id"""
         old = self.resources.pop(ansible_id)
@@ -295,17 +301,26 @@ class FakeJewel:
             return 201, {**data, "service_id": self.service_id}, None
         new = FakeResource(resource_type, self.service_id, data.get("resource_data", {}))
         ansible_id = str(data.get("ansible_id") or uuid.uuid4())
-        for aid, r in self.resources.items():
-            if aid != ansible_id and r.resource_type == resource_type and r.natural_key() == new.natural_key():
-                # Not verified against Jewel: a natural key clash is a database integrity error there
-                return 400, {"detail": f"{resource_type} {new.natural_key()} already exists"}, None
+        if clash := self._natural_key_clash(ansible_id, new):
+            return clash
         self.resources[ansible_id] = new
         return 201, self._resource_body(ansible_id), None
+
+    def _natural_key_clash(self, ansible_id, new):
+        for aid, r in self.resources.items():
+            if aid != ansible_id and r.resource_type == new.resource_type and r.natural_key() == new.natural_key():
+                # Not verified against Jewel: a natural key clash is a database integrity error there
+                return 400, {"detail": f"{new.resource_type} {new.natural_key()} already exists"}, None
+        return None
 
     def _update_resource(self, data, params, ansible_id):
         if ansible_id not in self.resources:
             return 404, {"detail": "No Resource matches the given query."}, None
-        self.resources[ansible_id].resource_data.update(data.get("resource_data", {}))
+        resource = self.resources[ansible_id]
+        updated = FakeResource(resource.resource_type, resource.service_id, {**resource.resource_data, **data.get("resource_data", {})})
+        if clash := self._natural_key_clash(ansible_id, updated):
+            return clash
+        resource.resource_data = updated.resource_data
         return 200, self._resource_body(ansible_id), None
 
     def _delete_resource(self, data, params, ansible_id):

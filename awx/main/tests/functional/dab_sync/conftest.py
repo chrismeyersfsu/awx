@@ -8,6 +8,7 @@ from django.db import connection
 from django.test import Client
 
 from ansible_base.rbac.models import RoleDefinition
+from ansible_base.resource_registry import apps as resource_registry_apps
 from ansible_base.resource_registry import service_client
 
 from awx.main import middleware
@@ -20,15 +21,26 @@ from .fake_jewel import JEWEL_URL, SERVICE_INDEX_PATH, FakeJewel
 
 @pytest.fixture
 def jewel(settings):
-    """AWX deployed under a fake Jewel: reverse sync on, JWT keys from the fake, DAB's client talking to it"""
+    """AWX deployed under a fake Jewel: reverse sync on, JWT keys from the fake, DAB's client talking to it
+
+    DAB connects the reverse sync signals at startup only if a resource server is configured, which
+    AWX's test settings do not do, so they are connected here and put back afterwards.
+    """
     jewel = FakeJewel()
     settings.RESOURCE_SERVER = {"URL": JEWEL_URL, "SECRET_KEY": "fake-jewel-secret", "VALIDATE_HTTPS": False}
     settings.RESOURCE_SERVICE_PATH = SERVICE_INDEX_PATH
     settings.RESOURCE_SERVER_SYNC_ENABLED = True
     settings.ANSIBLE_BASE_JWT_KEY = jewel.public_key
     cache.clear()  # cached JWT key, user and claims hashes
-    with mock.patch.object(service_client, "requests", SimpleNamespace(request=jewel.request, exceptions=requests.exceptions)):
-        yield jewel
+    resource_registry_apps.disconnect_resource_signals(sender=None)
+    resource_registry_apps.connect_resource_signals(sender=None)
+    try:
+        with mock.patch.object(service_client, "requests", SimpleNamespace(request=jewel.request, exceptions=requests.exceptions)):
+            yield jewel
+    finally:
+        resource_registry_apps.disconnect_resource_signals(sender=None)
+        settings.RESOURCE_SERVER_SYNC_ENABLED = False
+        resource_registry_apps.connect_resource_signals(sender=None)
     assert not jewel.unhandled, f"AWX made requests the fake Jewel has no route for: {jewel.unhandled}"
 
 
