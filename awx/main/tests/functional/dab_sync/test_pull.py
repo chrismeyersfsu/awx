@@ -11,7 +11,7 @@ from ansible_base.rbac.models import RoleDefinition, RoleTeamAssignment, RoleUse
 from ansible_base.rbac.role_sync_utils import AssignmentTuple
 from ansible_base.resource_registry.models import service_id
 
-from awx.main.models import Credential, Inventory, Organization, Team, User
+from awx.main.models import Credential, Inventory, JobTemplate, Organization, Team, User
 from awx.main.models.rbac import ROLE_DEFINITION_TO_ROLE_FIELD
 
 from .drift import corrupt_ansible_id, make_local
@@ -45,11 +45,13 @@ def test_pull_in_sync_changes_nothing(world, jewel, pull):
 
 
 @pytest.mark.django_db
-def test_pull_recreates_org_with_corrupted_ansible_id(world, jewel, pull):
+def test_pull_recreates_org_with_corrupted_ansible_id(world, jewel, pull, run_inventory_deletions):
     """P1: the org is not in Jewel's manifest under AWX's ansible_id, so orphan cleanup deletes it and the pull creates a new one
 
-    Deleting the org cascades: its teams and credentials are deleted and its inventories lose their org.
-    Teams come back from Jewel and their roles are re-granted, the credential does not come back.
+    Deleting the org cascades: its teams and credentials are deleted, and each of its inventories is
+    scheduled for deletion (delete_inventory_for_org): its job templates lose it, and the dispatcher
+    deletes it with its hosts and groups. Teams come back from Jewel and their roles are re-granted;
+    the credentials and inventories do not come back.
 
     The pull deletes orphans before it creates, so the create never clashes on the name and the pull's
     conflict handling (_handle_conflict) does not run. The natural key recovery added in AAP-95186 is
@@ -65,7 +67,10 @@ def test_pull_recreates_org_with_corrupted_ansible_id(world, jewel, pull):
     team = Team.objects.get(name="t1")
     assert team.pk != world.team.pk and team.organization == org
     assert not Credential.objects.filter(pk=world.credential.pk).exists()
-    assert Inventory.objects.get(pk=world.inventory.pk).organization is None
+    assert Inventory.objects.get(pk=world.inventory.pk).pending_deletion
+    assert JobTemplate.objects.get(pk=world.jt.pk).inventory is None
+    run_inventory_deletions()
+    assert not Inventory.objects.filter(pk=world.inventory.pk).exists()
     assert _has_user_role(world.alice, "Team Member", team)
     assert RoleTeamAssignment.objects.filter(team=team, role_definition__name="JobTemplate Execute", object_id=world.jt.pk).exists()
     assert old_rbac_mismatches() == []

@@ -11,7 +11,7 @@ import pytest
 
 from ansible_base.rbac.models import RoleTeamAssignment, RoleUserAssignment
 
-from awx.main.models import Credential, Inventory, Organization, Team, User
+from awx.main.models import Credential, Inventory, JobTemplate, Organization, Team, User
 
 from .drift import corrupt_ansible_id
 from .invariants import AwxOnlySnapshot, old_rbac_mismatches, sync_differences
@@ -51,7 +51,8 @@ def test_jewel_recreates_object_whose_delete_push_was_lost(world, jewel, pull, r
 
     AWX refuses the create push with a 400 whose detail is the database's unique constraint error,
     and keeps its old copy under the old ansible_id. The next pull deletes that copy as an orphan,
-    with the same cascades as P1 to P3, and creates Jewel's.
+    with the same cascades as P1 to P3 (for o1, its inventories are scheduled for deletion), and
+    creates Jewel's.
     """
     if resource_type == "shared.team":
         extra = dict(extra, organization=jewel.find("shared.organization", name="o1"))
@@ -72,6 +73,7 @@ def test_jewel_recreates_object_whose_delete_push_was_lost(world, jewel, pull, r
 
     assert not model.objects.filter(pk=obj.pk).exists()
     assert str(model.objects.get(**natural_key).resource.ansible_id) == new
+    assert Inventory.objects.get(pk=world.inventory.pk).pending_deletion is (resource_type == "shared.organization")
     assert sync_differences(jewel) == []
 
 
@@ -115,11 +117,11 @@ def test_jewel_assigns_role_awx_cannot_resolve(world, jewel, pull, corrupted):
 
 
 @pytest.mark.django_db
-def test_jewel_deletes_org(world, jewel):
+def test_jewel_deletes_org(world, jewel, run_inventory_deletions):
     """E3: Jewel deletes o1, AWX deletes it with the same cascades as P1 and nothing comes back
 
-    Its team t1 and credential cred1 are deleted, inventory inv1 loses its org, and the roles held
-    through t1 go with it. Bob's role on inv1 stays.
+    Its team t1 and credential cred1 are deleted, inventory inv1 is scheduled for deletion (jt1
+    loses it) and the dispatcher deletes it, and the roles held through t1 and on inv1 go with them.
     """
     snapshot = AwxOnlySnapshot.take()
 
@@ -129,14 +131,22 @@ def test_jewel_deletes_org(world, jewel):
     assert not Organization.objects.exists()
     assert not Team.objects.exists()
     assert not Credential.objects.exists()
-    assert Inventory.objects.get(pk=world.inventory.pk).organization is None
+    assert Inventory.objects.get(pk=world.inventory.pk).pending_deletion
+    assert JobTemplate.objects.get(pk=world.jt.pk).inventory is None
+    run_inventory_deletions()
+    assert not Inventory.objects.exists()
     assert not RoleTeamAssignment.objects.exists()
     assert snapshot.losses() == [
         f"lost ('Credential', {world.credential.pk}, 'cred1', {world.org.pk})",
         f"lost ('Inventory', {world.inventory.pk}, 'inv1', {world.org.pk})",
         f"lost ('team', 't1', 'JobTemplate Execute', 'jobtemplate', '{world.jt.pk}')",
+        f"lost ('user', 'bob', 'Inventory Use', 'inventory', '{world.inventory.pk}')",
     ]
-    assert _writes_to_jewel(jewel) == []
+    # deleting inv1 tells Jewel to drop the role assignments on it
+    assert [(c.path, c.data) for c in _writes_to_jewel(jewel)] == [
+        ("/api/gateway/v1/service-index/object-delete/", {"resource_type": "main.inventory", "resource_pk": str(world.inventory.pk)})
+    ]
+    assert sync_differences(jewel) == []
 
 
 @pytest.mark.django_db

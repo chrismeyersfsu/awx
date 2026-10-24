@@ -18,7 +18,8 @@ from ansible_base.resource_registry import service_client
 from awx.main import middleware
 from awx.main.middleware import SettingsCacheMiddleware
 from awx.main.models import Credential, Inventory, JobTemplate, Organization, User
-from awx.main.tasks.system import periodic_resource_sync
+from awx.main.tasks import system as system_tasks
+from awx.main.tasks.system import delete_inventory, periodic_resource_sync
 
 from .fake_jewel import JEWEL_URL, SERVICE_INDEX_PATH, FakeJewel
 
@@ -108,3 +109,15 @@ def api(jewel):
 def pull():
     """Run AWX's periodic resource sync, the way the dispatcher does"""
     return periodic_resource_sync
+
+
+@pytest.fixture
+def run_inventory_deletions():
+    """Run the delete_inventory tasks the dispatcher runs for inventories pending deletion (no dispatcher runs in tests)"""
+
+    def run():
+        with mock.patch.object(system_tasks, "emit_channel_notification"):  # a websocket message, over redis
+            for pk in Inventory.objects.filter(pending_deletion=True).values_list("pk", flat=True):
+                delete_inventory(pk, None)
+
+    return run

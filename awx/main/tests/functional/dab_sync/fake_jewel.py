@@ -588,8 +588,10 @@ class FakeJewel:
         return 200, {"deleted": len(deleted), "missing": len(triples) - len(deleted)}, None
 
     def _object_delete(self, data, params):
-        pk = data.get("resource_pk")
-        doomed = {a for a in self.assignments if a.ansible_id_or_pk == pk and a.ansible_id_or_pk not in self.resources}
+        # The assignments on one object: its pk and the content type of the assignment's role definition
+        pk, model = data.get("resource_pk"), data.get("resource_type", "").split(".")[-1]
+        on_model = set(RoleDefinition.objects.filter(content_type__model=model).values_list("name", flat=True))
+        doomed = {a for a in self.assignments if a.ansible_id_or_pk == pk and a.role_definition_name in on_model}
         self.assignments -= doomed
         return 200, {"deleted_count": len(doomed)}, None
 
