@@ -8,10 +8,12 @@ Jewel makes one fail, the behavior changed and the test should be updated on pur
 import pytest
 
 from ansible_base.rbac.models import RoleDefinition, RoleTeamAssignment, RoleUserAssignment
+from ansible_base.rbac.role_sync_utils import AssignmentTuple
 from ansible_base.resource_registry.models import service_id
 from ansible_base.resource_registry.signals.handlers import no_reverse_sync
 
 from awx.main.models import Credential, Inventory, Organization, Team, User
+from awx.main.models.rbac import ROLE_DEFINITION_TO_ROLE_FIELD
 
 from .drift import corrupt_ansible_id, make_local
 from .invariants import AwxOnlySnapshot, old_rbac_mismatches, sync_differences
@@ -160,3 +162,85 @@ def test_pull_takes_back_changed_object_awx_marked_local(world, jewel, pull, tar
     assert getattr(obj, field) != "changed in AWX"
     assert str(obj.resource.service_id) == jewel.service_id
     assert sync_differences(jewel) == []
+
+
+OLD_RBAC_ROLES = [("Team Member", "team"), ("Team Admin", "team"), ("Organization Member", "org"), ("Organization Admin", "org")]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("role_name, target", OLD_RBAC_ROLES)
+def test_pull_adds_user_to_old_rbac_role(world, jewel, pull, role_name, target):
+    """P11: Jewel gives bob a role on o1 or t1, the pull grants it and adds bob to the matching old role
+
+    The pull's assignment writes skip the signals that bridge new and old RBAC, so this records
+    that the old role still follows.
+    """
+    obj = getattr(world, target)
+    jewel.assignments.add(AssignmentTuple(jewel.find("shared.user", username="bob"), str(obj.resource.ansible_id), role_name, "user"))
+
+    pull()
+
+    assert _has_user_role(world.bob, role_name, obj)
+    assert getattr(obj, ROLE_DEFINITION_TO_ROLE_FIELD[role_name]).members.filter(pk=world.bob.pk).exists()
+    assert old_rbac_mismatches() == []
+    assert sync_differences(jewel) == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("role_name, target", OLD_RBAC_ROLES)
+def test_pull_removes_user_from_old_rbac_role(world, jewel, pull, role_name, target):
+    """P11: Jewel takes a role on o1 or t1 away from alice, the pull removes it and takes alice out of the matching old role"""
+    obj = getattr(world, target)
+    RoleDefinition.objects.get(name=role_name).give_permission(world.alice, obj)
+    old_role = getattr(obj, ROLE_DEFINITION_TO_ROLE_FIELD[role_name])
+    assert old_role.members.filter(pk=world.alice.pk).exists()
+    jewel.assignments.discard(AssignmentTuple(jewel.find("shared.user", username="alice"), str(obj.resource.ansible_id), role_name, "user"))
+
+    pull()
+
+    assert not _has_user_role(world.alice, role_name, obj)
+    assert not old_role.members.filter(pk=world.alice.pk).exists()
+    assert old_rbac_mismatches() == []
+    assert sync_differences(jewel) == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("jewel_adds", [True, False], ids=["added", "removed"])
+def test_pull_changes_team_role_on_org_in_old_rbac(world, jewel, pull, jewel_adds):
+    """P11: Jewel gives t1 Organization Inventory Admin on o1, or takes it away, and the pull follows in old RBAC
+
+    In old RBAC a team holds a role by its member_role being a parent of that role.
+    """
+    t1_member_role_is_parent = world.org.inventory_admin_role.parents.filter(pk=world.team.member_role.pk).exists
+    assignment = AssignmentTuple(str(world.team.resource.ansible_id), str(world.org.resource.ansible_id), "Organization Inventory Admin", "team")
+    if jewel_adds:
+        jewel.assignments.add(assignment)
+    else:
+        RoleDefinition.objects.get(name="Organization Inventory Admin").give_permission(world.team, world.org)
+        assert t1_member_role_is_parent()
+        jewel.assignments.discard(assignment)
+
+    pull()
+
+    assert (
+        RoleTeamAssignment.objects.filter(team=world.team, role_definition__name="Organization Inventory Admin", object_id=world.org.pk).exists() is jewel_adds
+    )
+    assert t1_member_role_is_parent() is jewel_adds
+    assert old_rbac_mismatches() == []
+    assert sync_differences(jewel) == []
+
+
+@pytest.mark.django_db
+def test_pull_does_not_apply_team_org_membership(world, jewel, pull):
+    """P11: Jewel makes t1 an Organization Member of o1, which AWX refuses for teams
+
+    The pull's create is rejected ("Assigning organization member permission to teams is not
+    allowed") and logged, the pull carries on, and the assignment stays only in Jewel.
+    """
+    assignment = AssignmentTuple(str(world.team.resource.ansible_id), str(world.org.resource.ansible_id), "Organization Member", "team")
+    jewel.assignments.add(assignment)
+
+    pull()
+
+    assert not RoleTeamAssignment.objects.filter(team=world.team, role_definition__name="Organization Member").exists()
+    assert sync_differences(jewel) == [f"assignment only in Jewel: {assignment}"]

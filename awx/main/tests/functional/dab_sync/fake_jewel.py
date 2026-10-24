@@ -20,7 +20,7 @@ import io
 import json
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse
 
@@ -29,23 +29,28 @@ import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from django.conf import settings
+from django.db.models import Q
 from requests.structures import CaseInsensitiveDict
 
 from ansible_base.rbac.claims import get_claims_hash, get_user_claims_hashable_form
 from ansible_base.rbac.models import RoleDefinition
 from ansible_base.rbac.role_sync_utils import AssignmentTuple, get_local_assignments
-from ansible_base.resource_registry.models import Resource
+from ansible_base.resource_registry.models import Resource, service_id
 
 JEWEL_URL = "https://jewel.fake.test"
 SERVICE_INDEX_PATH = "/api/gateway/v1/service-index/"
 JEWEL_API_PATH = "/api/gateway/v1/"
 
-# Resource types the fake holds. Others (role definitions, feature flags) get a 404 manifest, which the pull skips.
+# Objects the fake holds and compares with AWX's. It also holds role definitions, those Jewel
+# defines (see adopt) and those AWX pushes. Other types (feature flags) get a 404 manifest, which
+# the pull skips.
 TRACKED_TYPES = ("shared.organization", "shared.team", "shared.user")
+ROLE_DEFINITION = "shared.roledefinition"
 NATURAL_KEYS = {
     "shared.organization": ("name",),
     "shared.team": ("name", "organization"),
     "shared.user": ("username",),
+    ROLE_DEFINITION: ("name",),
 }
 OBJECT_TYPES = {"shared.organization": "organization", "shared.team": "team"}
 
@@ -120,14 +125,24 @@ class FakeJewel:
     # ---- setting up state ----
 
     def adopt(self):
-        """Make the fake hold exactly AWX's shared state, owned by Jewel: the state right after a clean sync"""
+        """Make the fake hold exactly AWX's shared state, owned by Jewel: the state right after a clean sync
+
+        Of the role definitions, Jewel holds and owns those for orgs, teams and the whole system,
+        AWX keeps owning those for its own objects (not verified against Jewel).
+        """
         self.resources.clear()
-        resources = Resource.objects.filter(content_type__resource_type__name__in=TRACKED_TYPES).select_related("content_type__resource_type")
+        platform_role_definitions = RoleDefinition.objects.filter(Q(content_type=None) | Q(content_type__model__in=OBJECT_TYPES.values()))
+        resources = Resource.objects.filter(
+            Q(content_type__resource_type__name__in=TRACKED_TYPES)
+            | Q(content_type__resource_type__name=ROLE_DEFINITION, object_id__in=[str(pk) for pk in platform_role_definitions.values_list("pk", flat=True)])
+        ).select_related("content_type__resource_type")
         for resource in resources:
             resource_type = resource.content_type.resource_type
             data = json.loads(json.dumps(resource_type.serializer_class(resource.content_object).data))
             self.resources[str(resource.ansible_id)] = FakeResource(resource_type.name, self.service_id, data)
         resources.update(service_id=self.service_id)
+        # Migrations create AWX's role definitions without pushing them, so they are AWX's own
+        Resource.objects.filter(content_type__resource_type__name=ROLE_DEFINITION).exclude(pk__in=resources.values("pk")).update(service_id=service_id())
         self.assignments = get_local_assignments()
         self.role_definitions = set(RoleDefinition.objects.values_list("name", flat=True))
 
@@ -145,6 +160,18 @@ class FakeJewel:
         ansible_id = str(uuid.uuid4())
         self.resources[ansible_id] = FakeResource(resource_type, self.service_id, resource_data)
         return ansible_id
+
+    def rename_role_definition(self, name, new_name):
+        """Rename a role definition in Jewel, its assignments go with it"""
+        self.resources[self.find(ROLE_DEFINITION, name=name)].resource_data["name"] = new_name
+        self.role_definitions = (self.role_definitions - {name}) | {new_name}
+        self.assignments = {replace(a, role_definition_name=new_name) if a.role_definition_name == name else a for a in self.assignments}
+
+    def delete_role_definition(self, name):
+        """Delete a role definition in Jewel, with its assignments"""
+        del self.resources[self.find(ROLE_DEFINITION, name=name)]
+        self.role_definitions.discard(name)
+        self.assignments = {a for a in self.assignments if a.role_definition_name != name}
 
     def replace_user(self, ansible_id):
         """Delete a user in Jewel and register a different person under the same username, returning the new ansible_id"""
@@ -297,10 +324,9 @@ class FakeJewel:
 
     def _create_resource(self, data, params):
         resource_type = data.get("resource_type")
-        if resource_type == "shared.roledefinition":
+        if resource_type == ROLE_DEFINITION:
             self.role_definitions.add(data["resource_data"]["name"])
-            return 201, {**data, "service_id": self.service_id}, None
-        if resource_type not in TRACKED_TYPES:
+        if resource_type not in NATURAL_KEYS:
             return 201, {**data, "service_id": self.service_id}, None
         new = FakeResource(resource_type, self.service_id, data.get("resource_data", {}))
         ansible_id = str(data.get("ansible_id") or uuid.uuid4())
