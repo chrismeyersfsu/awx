@@ -1,0 +1,4 @@
+instance.json
+results.json
+*.log
+__pycache__/
