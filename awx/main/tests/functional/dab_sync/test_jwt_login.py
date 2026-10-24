@@ -60,10 +60,42 @@ def test_reused_username_gets_a_new_user(world, jewel, api):
     inventory = api.get(f"/api/controller/v2/inventories/{world.inventory.pk}/", **jewel.jwt_headers(new_bob))
 
     assert [(p.method, p.status) for p in jewel.pushes] == [("DELETE", 204), ("POST", 201)]
+    _assert_new_user_without_old_access(world, me, inventory, new_bob)
+
+
+@pytest.mark.django_db
+def test_reused_username_gets_a_new_user_when_pushes_arrive_out_of_order(world, jewel, api):
+    """J4: the same, but Jewel's push of the new bob reaches AWX before the push of the delete
+
+    AWX refuses the create (old bob still has the username) with a 400 that Jewel only logs,
+    then the delete removes old bob. AWX has no bob until the new person logs in, when the JWT
+    login creates a user for the token's ansible_id. They get a new user with none of old bob's access.
+    """
+    with jewel.pushes_held():
+        jewel.delete(jewel.find("shared.user", username="bob"))
+    new_bob = jewel.create("shared.user", username="bob", first_name="Someone", last_name="Else")
+    create = jewel.pushes[-1]
+    jewel.deliver_held()
+    delete = jewel.pushes[0]
+    bob_before_login = User.objects.filter(username="bob").exists()
+
+    me = api.get("/api/controller/v2/me/", **jewel.jwt_headers(new_bob))
+    inventory = api.get(f"/api/controller/v2/inventories/{world.inventory.pk}/", **jewel.jwt_headers(new_bob))
+
+    assert create.status == 400, create.body
+    assert "UNIQUE" in create.body["detail"].upper()
+    assert delete.status == 204
+    assert not bob_before_login
+    _assert_new_user_without_old_access(world, me, inventory, new_bob)
+
+
+def _assert_new_user_without_old_access(world, me, inventory, new_bob):
     assert me.status_code == 200, me.content
     assert not User.objects.filter(pk=world.bob.pk).exists()
-    assert me.json()["results"][0]["id"] != world.bob.pk
-    assert inventory.status_code in (403, 404)
+    bob = User.objects.get(username="bob")
+    assert me.json()["results"][0]["id"] == bob.pk
+    assert str(bob.resource.ansible_id) == new_bob
+    assert inventory.status_code == 403, inventory.content
     assert not RoleUserAssignment.objects.filter(role_definition__name="Inventory Use", object_id=world.inventory.pk).exists()
 
 

@@ -133,6 +133,8 @@ class FakeJewel:
     pushes: list[Push] = field(default_factory=list)
     awx: object = None  # django.test.Client the pushes go through, set by the jewel fixture
     _losing_pushes: bool = False
+    _holding_pushes: bool = False
+    _held: list = field(default_factory=list)
 
     def __post_init__(self):
         self._private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -264,6 +266,21 @@ class FakeJewel:
         finally:
             self._losing_pushes = False
 
+    @contextmanager
+    def pushes_held(self):
+        """Jewel's pushes inside wait until deliver_held(), as pushes from Jewel's background threads can arrive late or out of order"""
+        self._holding_pushes = True
+        try:
+            yield
+        finally:
+            self._holding_pushes = False
+
+    def deliver_held(self):
+        """Send the pushes held by pushes_held(), in the order they were made"""
+        held, self._held = self._held, []
+        for push, by in held:
+            self._send(push, by)
+
     def replace_user(self, ansible_id, by=None):
         """Delete a user in Jewel and register a different person under the same username, returning the new ansible_id"""
         old = self.resources[ansible_id]
@@ -305,10 +322,16 @@ class FakeJewel:
             push.lost = True
             return push
         by = by or self._default_user()
-        send = getattr(self.awx, method.lower())
+        if self._holding_pushes:
+            self._held.append((push, by))
+            return push
+        return self._send(push, by)
+
+    def _send(self, push, by):
+        send = getattr(self.awx, push.method.lower())
         response = send(
-            AWX_SERVICE_INDEX_PATH + path,
-            data=json.dumps(data) if data is not None else None,
+            AWX_SERVICE_INDEX_PATH + push.path,
+            data=json.dumps(push.data) if push.data is not None else None,
             content_type="application/json",
             **self.jwt_headers(by, resource_api_actions="*"),
         )
