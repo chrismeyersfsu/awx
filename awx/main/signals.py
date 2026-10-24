@@ -29,6 +29,7 @@ from crum.signals import current_user_getter
 
 # Ansible_base app
 from ansible_base.rbac.models import RoleUserAssignment, RoleTeamAssignment
+from ansible_base.resource_registry.tasks.sync_dry_run import delete_preview
 
 # AWX
 from awx.main.models import (
@@ -567,6 +568,13 @@ def delete_inventory_for_org(sender, instance, **kwargs):
             inventory.schedule_deletion(user_id=getattr(user, 'id', None))
         except RuntimeError as e:
             logger.debug(e)
+
+
+@receiver(delete_preview, sender=Organization)
+def preview_delete_inventory_for_org(sender, instance, effects, **kwargs):
+    """What delete_inventory_for_org would do, for DAB's resource sync dry run"""
+    for inventory in Inventory.objects.filter(organization__pk=instance.pk, pending_deletion=False):
+        effects.append(f"inventory {inventory.name} (pk {inventory.pk}) is scheduled for deletion")
 
 
 @receiver(pre_delete, sender=WorkflowJobTemplateNode)
