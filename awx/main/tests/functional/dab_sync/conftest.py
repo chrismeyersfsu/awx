@@ -13,7 +13,7 @@ from ansible_base.resource_registry import service_client
 
 from awx.main import middleware
 from awx.main.middleware import SettingsCacheMiddleware
-from awx.main.models import Credential, Inventory, JobTemplate, Organization, User
+from awx.main.models import Credential, Inventory, JobTemplate, Organization, User, get_system_auditor_role
 from awx.main.tasks.system import periodic_resource_sync
 
 from .fake_jewel import JEWEL_URL, SERVICE_INDEX_PATH, FakeJewel
@@ -62,6 +62,7 @@ def world(jewel, setup_managed_roles, credentialtype_ssh):
     RoleDefinition.objects.get(name="Team Member").give_permission(alice, team)
     RoleDefinition.objects.get(name="JobTemplate Execute").give_permission(team, jt)
     RoleDefinition.objects.get(name="Inventory Use").give_permission(bob, inventory)
+    get_system_auditor_role()  # an installed AWX has it from migrations, otherwise the first is_system_auditor check creates and pushes it
 
     jewel.adopt()
     jewel.calls.clear()

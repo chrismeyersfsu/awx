@@ -49,6 +49,10 @@ def test_pull_recreates_org_with_corrupted_ansible_id(world, jewel, pull):
 
     Deleting the org cascades: its teams and credentials are deleted and its inventories lose their org.
     Teams come back from Jewel and their roles are re-granted, the credential does not come back.
+
+    The pull deletes orphans before it creates, so the create never clashes on the name and the pull's
+    conflict handling (_handle_conflict) does not run. The natural key recovery added in AAP-95186 is
+    only on the login path (rbac.claims.get_or_create_resource), see J6.
     """
     corrupt_ansible_id(world.org)
 
