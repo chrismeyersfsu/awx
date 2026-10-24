@@ -81,6 +81,7 @@ class Failure:
     body: dict | str | None
     exc: Exception | None
     times: int | None
+    headers: dict | None = None
 
     def matches(self, method, path):
         return self.times != 0 and self.method in ("*", method) and fnmatch.fnmatch(path, self.path_glob)
@@ -153,9 +154,9 @@ class FakeJewel:
         self.resources[new_id] = FakeResource("shared.user", self.service_id, dict(old.resource_data, first_name="Someone", last_name="Else"))
         return new_id
 
-    def fail(self, method, path_glob, status=None, body=None, exc=None, times=None):
-        """Answer matching requests with an error status and body, or raise exc (like requests.ConnectionError)"""
-        self.failures.append(Failure(method, path_glob, status, body, exc, times))
+    def fail(self, method, path_glob, status=None, body=None, exc=None, times=None, headers=None):
+        """Answer matching requests with a status, body and headers instead of the route, or raise exc (like requests.ConnectionError)"""
+        self.failures.append(Failure(method, path_glob, status, body, exc, times, headers))
 
     # ---- what Jewel hands a user ----
 
@@ -228,7 +229,7 @@ class FakeJewel:
                     failure.times -= 1
                 if failure.exc is not None:
                     raise failure.exc
-                return self._response(call, url, failure.status, failure.body)
+                return self._response(call, url, failure.status, failure.body, failure.headers)
 
         for verb, pattern, handler in self._routes:
             if verb == method and (match := re.fullmatch(pattern, path)):
@@ -253,6 +254,8 @@ class FakeJewel:
             response.headers.setdefault("Content-Type", "application/json")
         else:
             response._content = b""
+        response.raw = io.BytesIO(response._content)  # read already, like a real response once its content is accessed
+        response._content_consumed = True
         response.request = requests.Request(call.method, response.url).prepare()
         return response
 
