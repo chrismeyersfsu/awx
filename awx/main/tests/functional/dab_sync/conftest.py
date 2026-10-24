@@ -14,6 +14,8 @@ from ansible_base.rbac.managed import get_managed_role_constructors
 from ansible_base.rbac.models import RoleDefinition
 from ansible_base.resource_registry import apps as resource_registry_apps
 from ansible_base.resource_registry import service_client
+from ansible_base.resource_registry.tasks.sync import SyncExecutor
+from ansible_base.resource_registry.tasks.sync_dry_run import SyncDryRun
 
 from awx.main import middleware
 from awx.main.middleware import SettingsCacheMiddleware
@@ -22,6 +24,7 @@ from awx.main.tasks import system as system_tasks
 from awx.main.tasks.system import delete_inventory, periodic_resource_sync
 
 from .fake_jewel import JEWEL_URL, SERVICE_INDEX_PATH, FakeJewel
+from .invariants import SyncState, dry_run_mismatches
 
 # The managed role registry the AAP installer gives AWX
 # (aap-containerized-installer roles/automationcontroller/templates/settings.py.j2)
@@ -106,9 +109,34 @@ def api(jewel):
 
 
 @pytest.fixture
-def pull():
-    """Run AWX's periodic resource sync, the way the dispatcher does"""
-    return periodic_resource_sync
+def pull(jewel):
+    """Run AWX's periodic resource sync, the way the dispatcher does
+
+    DAB's resource sync dry run runs first, and must change nothing and predict what the sync then
+    does: the same exception, or the same objects deleted, created and updated and the same
+    assignments left.
+    """
+
+    def run():
+        before, calls = SyncState.take(), len(jewel.calls)
+        plan, plan_error = None, None
+        try:
+            plan = SyncDryRun().run()
+        except Exception as exc:
+            plan_error = exc
+        assert SyncState.take() == before, "the dry run changed AWX"
+        assert {c.method for c in jewel.calls[calls:]} <= {"GET"}, "the dry run wrote to Jewel"
+        executors = []
+        with mock.patch.object(system_tasks, "SyncExecutor", side_effect=lambda: executors.append(SyncExecutor()) or executors[-1]):
+            try:
+                periodic_resource_sync()
+            except Exception as exc:
+                assert plan_error is not None and isinstance(exc, type(plan_error)), f"the pull raised {exc!r}, the dry run {plan_error!r}"
+                raise
+        assert plan_error is None, f"the dry run raised {plan_error!r}, the pull did not"
+        assert dry_run_mismatches(plan, before, SyncState.take(), executors[0].results) == []
+
+    return run
 
 
 @pytest.fixture

@@ -13,7 +13,7 @@ from ansible_base.rbac.models import RoleTeamAssignment, RoleUserAssignment
 from ansible_base.rbac.role_sync_utils import get_local_assignments
 from ansible_base.resource_registry.models import Resource
 
-from awx.main.models import Credential, Inventory, JobTemplate, Organization, Project, Team
+from awx.main.models import ActivityStream, Credential, Inventory, JobTemplate, Organization, Project, Team
 from awx.main.models.rbac import ROLE_DEFINITION_TO_ROLE_FIELD
 
 from .fake_jewel import TRACKED_TYPES
@@ -89,4 +89,56 @@ def sync_differences(jewel):
     local_assignments = get_local_assignments()
     problems += [f"assignment only in AWX: {a}" for a in sorted(local_assignments - jewel.assignments, key=str)]
     problems += [f"assignment only in Jewel: {a}" for a in sorted(jewel.assignments - local_assignments, key=str)]
+    return problems
+
+
+@dataclass(frozen=True)
+class SyncState:
+    """C5: what a pull can change, to check DAB's resource sync dry run against what the pull did
+
+    Resources are (resource type, ansible_id, object_id) and AWX-only objects (model label, pk).
+    """
+
+    resources: frozenset
+    awx_only: frozenset
+    pending_inventories: frozenset
+    assignments: frozenset
+    activity: int
+
+    @classmethod
+    def take(cls):
+        return cls(
+            resources=frozenset(
+                (r.content_type.resource_type.name, str(r.ansible_id), r.object_id) for r in Resource.objects.select_related("content_type__resource_type")
+            ),
+            awx_only=frozenset((model._meta.label, str(pk)) for model in AWX_ONLY_MODELS for pk in model.objects.values_list("pk", flat=True)),
+            pending_inventories=frozenset(Inventory.objects.filter(pending_deletion=True).values_list("pk", flat=True)),
+            assignments=frozenset(get_local_assignments()),
+            activity=ActivityStream.objects.count(),
+        )
+
+
+def dry_run_mismatches(plan, before, after, results):
+    """C5: differences between what the dry run planned and what the pull then did (SyncExecutor.results)"""
+    problems = []
+
+    def compare(what, planned, done):
+        planned, done = set(planned), set(done)
+        if planned != done:
+            problems.append(f"{what}: planned but not done {sorted(planned - done, key=str)}, done but not planned {sorted(done - planned, key=str)}")
+
+    compare("deleted shared objects", plan.deleted_ansible_ids, {aid for _, aid, _ in before.resources - after.resources})
+    compare("created shared objects", plan.created_ansible_ids, {aid for _, aid, _ in after.resources - before.resources})
+    compare("updated shared objects", {c.ansible_id for c in plan.changes if c.action == "update"}, {str(i.ansible_id) for i in results.get("updated", [])})
+    compare("deleted AWX-only objects", {o for o in plan.deleted_objects if o[0] in {m._meta.label for m in AWX_ONLY_MODELS}}, before.awx_only - after.awx_only)
+    compare(
+        "inventories scheduled for deletion",
+        {e for c in plan.changes for e in c.detail.get("service effects", [])},
+        {
+            f"inventory {i.name} (pk {i.pk}) is scheduled for deletion"
+            for i in Inventory.objects.filter(pk__in=after.pending_inventories - before.pending_inventories)
+        },
+    )
+    if "assignments_created" in results:
+        compare("assignments after the pull", plan.assignments_after, after.assignments)
     return problems
