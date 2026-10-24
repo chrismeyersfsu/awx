@@ -114,7 +114,11 @@ def test_update_team_awx_marked_local(world, jewel, api, pull):
 
 @pytest.mark.django_db
 def test_delete_team_awx_marked_local(world, jewel, api):
-    """W4: only updates skip the push for objects AWX marks as its own, a delete is pushed and removes the team in Jewel too"""
+    """W4: only updates skip the push for objects AWX marks as its own, a delete is pushed and removes the team in Jewel too
+
+    AWX also asks Jewel to delete the role assignments on main.team, which Jewel only knows as
+    shared.team, so that gets a 400 that AWX logs and ignores.
+    """
     headers = _admin(jewel)
     make_local(world.team)
     t1 = jewel.find("shared.team", name="t1")
@@ -124,33 +128,66 @@ def test_delete_team_awx_marked_local(world, jewel, api):
 
     assert response.status_code == 204, response.content
     assert _pushes(jewel) == [("DELETE", f"resources/{t1}/", 204)]
+    [object_delete] = [c for c in jewel.calls if c.path.endswith("/object-delete/")]
+    assert (object_delete.data, object_delete.status) == ({"resource_type": "main.team", "resource_pk": str(world.team.pk)}, 400)
     assert not Team.objects.filter(pk=world.team.pk).exists()
     assert t1 not in jewel.resources
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize("action", ["create", "rename"])
-def test_team_name_jewel_already_has(world, jewel, api, action):
-    """W5: Jewel created team t2 in o1 but the push never reached AWX, then AWX creates t2 or renames t1 to t2
-
-    The fake answers the natural key clash with a 400 (not verified against Jewel), so AWX
-    rejects the change and both sides keep one t2.
-    """
-    headers = _admin(jewel)
+def _t2_create_push_lost(jewel):
+    """Jewel creates team t2 in o1 and the push never reaches AWX, returning t2's ansible_id"""
     with jewel.pushes_lost():
-        t2 = jewel.create("shared.team", name="t2", organization=jewel.find("shared.organization", name="o1"), description="")
+        return jewel.create("shared.team", name="t2", organization=jewel.find("shared.organization", name="o1"), description="")
+
+
+@pytest.mark.django_db
+def test_create_team_jewel_already_has(world, jewel, api, pull):
+    """W5: Jewel has t2, whose create push never reached AWX, and AWX creates t2
+
+    Jewel's GetOrCreateProcessor takes the push as its existing t2 and gives it AWX's new
+    ansible_id, so the create succeeds, both sides have one t2 under AWX's ansible_id and a pull
+    changes nothing. Any other service still holding t2's old ansible_id is not told.
+    """
+    old = _t2_create_push_lost(jewel)
+    alice = jewel.find("shared.user", username="alice")
+    jewel.assign("Team Member", alice, old, by=jewel.find("shared.user", username="admin"))
+
+    response = api.post("/api/controller/v2/teams/", {"name": "t2", "organization": world.org.pk}, content_type="application/json", **_admin(jewel))
+
+    assert response.status_code == 201, response.content
+    new = str(Team.objects.get(name="t2").resource.ansible_id)
+    assert new != old
+    assert old not in jewel.resources
+    assert jewel.find("shared.team", name="t2") == new
+    assert any(a.ansible_id_or_pk == new and a.role_definition_name == "Team Member" for a in jewel.assignments)
+
+    pull()
+
+    assert str(Team.objects.get(name="t2").resource.ansible_id) == new
+    assert sync_differences(jewel) == []
+
+
+@pytest.mark.django_db
+def test_rename_team_to_name_jewel_already_has(world, jewel, api, pull):
+    """W5: Jewel has t2, whose create push never reached AWX, and AWX renames t1 to t2
+
+    The update clashes with Jewel's t2 in the database, Jewel answers 400 and AWX rejects the
+    rename. The next pull brings Jewel's t2 over.
+    """
+    t2 = _t2_create_push_lost(jewel)
     before = _teams()
 
-    if action == "create":
-        response = api.post("/api/controller/v2/teams/", {"name": "t2", "organization": world.org.pk}, content_type="application/json", **headers)
-    else:
-        response = api.patch(f"/api/controller/v2/teams/{world.team.pk}/", {"name": "t2"}, content_type="application/json", **headers)
+    response = api.patch(f"/api/controller/v2/teams/{world.team.pk}/", {"name": "t2"}, content_type="application/json", **_admin(jewel))
 
     assert response.status_code == 400, response.content
     assert response.json() == SYNC_FAILED
+    assert _pushes(jewel)[-1] == ("PUT", f"resources/{world.team.resource.ansible_id}/", 400)
     assert _teams() == before
-    assert jewel.find("shared.team", name="t2") == t2
-    assert jewel.find("shared.team", name="t1")
+
+    pull()
+
+    assert str(Team.objects.get(name="t2").resource.ansible_id) == t2
+    assert sync_differences(jewel) == []
 
 
 @pytest.mark.django_db

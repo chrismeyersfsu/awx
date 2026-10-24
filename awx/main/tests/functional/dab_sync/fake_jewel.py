@@ -37,7 +37,7 @@ from django.db.models import Q
 from requests.structures import CaseInsensitiveDict
 
 from ansible_base.rbac.claims import get_claims_hash, get_user_claims_hashable_form
-from ansible_base.rbac.models import RoleDefinition
+from ansible_base.rbac.models import DABContentType, RoleDefinition
 from ansible_base.rbac.role_sync_utils import AssignmentTuple, get_local_assignments
 from ansible_base.resource_registry.models import Resource, service_id
 
@@ -494,17 +494,48 @@ class FakeJewel:
             return 201, {**data, "service_id": self.service_id}, None
         new = FakeResource(resource_type, self.service_id, data.get("resource_data", {}))
         ansible_id = str(data.get("ansible_id") or uuid.uuid4())
-        if clash := self._natural_key_clash(ansible_id, new):
-            return clash
-        self.resources[ansible_id] = new
+        if (existing := self._same_natural_key(ansible_id, new)) is not None:
+            self._adopt(existing, ansible_id, new.resource_data)
+        else:
+            self.resources[ansible_id] = new
         return 201, self._resource_body(ansible_id), None
 
+    def _same_natural_key(self, ansible_id, new):
+        """The ansible_id of another resource with new's natural key, or None"""
+        return next(
+            (aid for aid, r in self.resources.items() if aid != ansible_id and r.resource_type == new.resource_type and r.natural_key() == new.natural_key()),
+            None,
+        )
+
     def _natural_key_clash(self, ansible_id, new):
-        for aid, r in self.resources.items():
-            if aid != ansible_id and r.resource_type == new.resource_type and r.natural_key() == new.natural_key():
-                # Not verified against Jewel: a natural key clash is a database integrity error there
-                return 400, {"detail": f"{new.resource_type} {new.natural_key()} already exists"}, None
+        """Jewel's answer to an update that would give a resource another one's natural key
+
+        It is a database integrity error there, which aap_gateway_api.views.gateway_exception_handler
+        turns into this 400.
+        """
+        if self._same_natural_key(ansible_id, new) is not None:
+            return 400, {"detail": "A resource with these values already exists."}, None
         return None
+
+    def _adopt(self, old, ansible_id, resource_data):
+        """A create of an object Jewel has under another ansible_id takes that object over
+
+        Jewel's GetOrCreateProcessor (aap_gateway_api.resource_api) finds the existing object by its
+        natural key and updates it, and DAB's Resource.create_resource then sets the pushed
+        ansible_id on it. The object keeps its assignments, which follow it to the new ansible_id.
+        Jewel does not push this to other services.
+        """
+        resource = self.resources.pop(old)
+        resource.resource_data = {**resource.resource_data, **resource_data}
+        self.resources[ansible_id] = resource
+        self.assignments = {
+            replace(
+                a,
+                actor_ansible_id=ansible_id if a.actor_ansible_id == old else a.actor_ansible_id,
+                ansible_id_or_pk=ansible_id if a.ansible_id_or_pk == old else a.ansible_id_or_pk,
+            )
+            for a in self.assignments
+        }
 
     def _update_resource(self, data, params, ansible_id):
         if ansible_id not in self.resources:
@@ -588,12 +619,28 @@ class FakeJewel:
         return 200, {"deleted": len(deleted), "missing": len(triples) - len(deleted)}, None
 
     def _object_delete(self, data, params):
-        # The assignments on one object: its pk and the content type of the assignment's role definition
-        pk, model = data.get("resource_pk"), data.get("resource_type", "").split(".")[-1]
+        """Delete the assignments on one of a service's objects, like DAB's ServiceObjectDeleteViewSet
+
+        Jewel looks the object's content type up by app label and model. It has AWX's own models
+        (main.inventory) but organizations and teams only as shared.*, so main.team is not found.
+        """
+        resource_type, pk = data.get("resource_type", ""), data.get("resource_pk")
+        model = resource_type.split(".")[-1]
+        if not DABContentType.objects.filter(app_label=resource_type.split(".")[0], model=model).exclude(service="shared").exists():
+            return 400, {"error": f"Content type not found: {resource_type}"}, None
         on_model = set(RoleDefinition.objects.filter(content_type__model=model).values_list("name", flat=True))
         doomed = {a for a in self.assignments if a.ansible_id_or_pk == pk and a.role_definition_name in on_model}
         self.assignments -= doomed
-        return 200, {"deleted_count": len(doomed)}, None
+        users = sum(1 for a in doomed if a.assignment_type == "user")
+        return (
+            200,
+            {
+                "message": f"Deleted {len(doomed)} role assignments for {resource_type} {pk}",
+                "deleted_count": len(doomed),
+                "breakdown": {"user_assignments_deleted": users, "team_assignments_deleted": len(doomed) - users},
+            },
+            None,
+        )
 
     # ---- jewel API ----
 
