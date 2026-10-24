@@ -1,23 +1,25 @@
 """
-How AWX's JWT login applies Jewel's user data and claims today, when they differ from what AWX has.
+How AWX applies Jewel's changes to users and their roles today: by Jewel's push, and by the JWT login when a push was lost.
 
 These tests record current behavior, they do not judge it.
 
-A login maps the token's user_data onto the user found by ansible_id. When the token's claims
-hash differs from the hash of AWX's own assignments, DAB fetches the claims from Jewel's
-jwt_claims endpoint and makes AWX's managed role assignments match them.
+Jewel pushes each change to AWX as it is made. A login maps the token's user_data onto the
+user found by ansible_id, and when the token's claims hash differs from the hash of AWX's own
+assignments, DAB fetches the claims from Jewel's jwt_claims endpoint and makes AWX's managed
+role assignments match them.
 """
 
 import pytest
 import requests
 
 from ansible_base.rbac.models import RoleTeamAssignment, RoleUserAssignment
-from ansible_base.rbac.role_sync_utils import AssignmentTuple
 
 from awx.main.models import Organization, Team, User
 
 from .drift import corrupt_ansible_id
 from .invariants import old_rbac_mismatches
+
+DELIVERY = pytest.mark.parametrize("delivered", [True, False], ids=["pushed", "push_lost"])
 
 
 def _alice(jewel):
@@ -32,14 +34,22 @@ def _claims_fetches(jewel):
     return [(c.method, c.status) for c in jewel.calls if "/jwt_claims/" in c.path]
 
 
+def _me(api, jewel, ansible_id):
+    return api.get("/api/controller/v2/me/", **jewel.jwt_headers(ansible_id))
+
+
 @pytest.mark.django_db
-def test_login_renames_user_renamed_in_jewel(world, jewel, api):
-    """J3: alice is renamed to alicia in Jewel, her next login renames her AWX user in place"""
+@DELIVERY
+def test_rename_in_jewel(world, jewel, api, delivered):
+    """J3: Jewel renames alice to alicia. The push renames her AWX user in place, and if it was lost her next login does."""
     alice_id = _alice(jewel)
-    jewel.resources[alice_id].resource_data["username"] = "alicia"
+    with jewel.pushing(delivered):
+        jewel.update(alice_id, username="alicia")
+    after_push = User.objects.get(pk=world.alice.pk).username
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    response = _me(api, jewel, alice_id)
 
+    assert after_push == ("alicia" if delivered else "alice")
     assert response.status_code == 200, response.content
     assert response.json()["results"][0]["username"] == "alicia"
     assert User.objects.get(pk=world.alice.pk).username == "alicia"
@@ -48,16 +58,20 @@ def test_login_renames_user_renamed_in_jewel(world, jewel, api):
 
 
 @pytest.mark.django_db
-def test_login_keeps_name_when_jewel_rename_clashes(world, jewel, api):
-    """J3: Jewel renames alice to bob while AWX still has a bob, DAB skips the rename and logs a warning
+def test_rename_in_jewel_to_username_awx_still_has(world, jewel, api):
+    """J3: Jewel deletes bob, but that push is lost, then renames alice to bob
 
-    Alice logs in as herself, still named alice, and bob is untouched.
+    AWX refuses the rename push (bob is still there), and alice's login skips the rename with a
+    warning. Alice stays alice in AWX and the old bob is untouched.
     """
     alice_id = _alice(jewel)
-    jewel.resources[alice_id].resource_data["username"] = "bob"
+    with jewel.pushes_lost():
+        jewel.delete(jewel.find("shared.user", username="bob"))
+    jewel.update(alice_id, username="bob")
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    response = _me(api, jewel, alice_id)
 
+    assert jewel.pushes[-1].status == 400
     assert response.status_code == 200, response.content
     assert response.json()["results"][0]["id"] == world.alice.pk
     assert User.objects.get(pk=world.alice.pk).username == "alice"
@@ -65,23 +79,24 @@ def test_login_keeps_name_when_jewel_rename_clashes(world, jewel, api):
 
 
 @pytest.mark.django_db
-def test_login_creates_org_and_team_awx_does_not_have(world, jewel, api):
-    """J5: Jewel made alice a member of team t2 in org o2, which AWX does not have yet
+@DELIVERY
+def test_jewel_adds_user_to_new_org_and_team(world, jewel, api, delivered):
+    """J5: Jewel creates org o2 with team t2 and makes alice a member
 
-    The claims hash differs, so AWX fetches the claims and creates o2 and t2 with Jewel's
-    ansible_ids, then makes alice a member in both old and new RBAC.
+    Pushed, AWX has o2, t2 and the membership before alice logs in, so her claims match and AWX
+    does not fetch them. With the pushes lost, her login fetches the claims and creates o2 and t2
+    with Jewel's ansible_ids. Either way alice ends up a member in old and new RBAC.
     """
     alice_id = _alice(jewel)
-    o1 = jewel.find("shared.organization", name="o1")
-    o2 = jewel.add("shared.organization", **dict(jewel.resources[o1].resource_data, name="o2"))
-    t1 = jewel.find("shared.team", name="t1")
-    t2 = jewel.add("shared.team", **dict(jewel.resources[t1].resource_data, name="t2", organization=o2))
-    jewel.assignments.add(AssignmentTuple(alice_id, t2, "Team Member", "user"))
+    with jewel.pushing(delivered):
+        o2 = jewel.create("shared.organization", name="o2", description="")
+        t2 = jewel.create("shared.team", name="t2", organization=o2, description="")
+        jewel.assign("Team Member", alice_id, t2)
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    response = _me(api, jewel, alice_id)
 
     assert response.status_code == 200, response.content
-    assert _claims_fetches(jewel) == [("GET", 200)]
+    assert _claims_fetches(jewel) == ([] if delivered else [("GET", 200)])
     org = Organization.objects.get(name="o2")
     team = Team.objects.get(name="t2")
     assert str(org.resource.ansible_id) == o2
@@ -101,10 +116,9 @@ def test_login_leaves_corrupted_team_for_existing_member(world, jewel, api):
     Jewel's, so AWX's claims hash matches the token's. AWX does not fetch the claims and t1 keeps
     the bad ansible_id.
     """
-    alice_id = _alice(jewel)
     bad_id = corrupt_ansible_id(world.team)
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    response = _me(api, jewel, _alice(jewel))
 
     assert response.status_code == 200, response.content
     assert _claims_fetches(jewel) == []
@@ -114,19 +128,21 @@ def test_login_leaves_corrupted_team_for_existing_member(world, jewel, api):
 
 @pytest.mark.django_db
 def test_login_repairs_corrupted_team_for_new_member(world, jewel, api):
-    """J6: AWX has t1 under a bad ansible_id and Jewel made bob a member of t1, bob logs in
+    """J6: AWX has t1 under a bad ansible_id and Jewel makes bob a member of t1, then bob logs in
 
-    AWX fetches the claims and cannot find t1 by Jewel's ansible_id. Creating it clashes on
-    (name, organization), and the natural key recovery from AAP-95186 gives AWX's t1 Jewel's
-    ansible_id. t1 keeps its pk, its members and its roles, and bob becomes a member.
+    AWX refuses the push (it does not know t1's ansible_id). Bob's login fetches the claims, cannot
+    find t1 by Jewel's ansible_id, and creating it clashes on (name, organization), so the natural
+    key recovery from AAP-95186 gives AWX's t1 Jewel's ansible_id. t1 keeps its pk, members and
+    roles, and bob becomes a member.
     """
     bob_id = jewel.find("shared.user", username="bob")
     t1 = jewel.find("shared.team", name="t1")
     corrupt_ansible_id(world.team)
-    jewel.assignments.add(AssignmentTuple(bob_id, t1, "Team Member", "user"))
+    jewel.assign("Team Member", bob_id, t1)
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(bob_id))
+    response = _me(api, jewel, bob_id)
 
+    assert (jewel.pushes[-1].status, jewel.pushes[-1].body) == (400, {"object_ansible_id": ["Resource with this ansible_id does not exist."]})
     assert response.status_code == 200, response.content
     assert _claims_fetches(jewel) == [("GET", 200)]
     team = Team.objects.get(name="t1")
@@ -139,19 +155,19 @@ def test_login_repairs_corrupted_team_for_new_member(world, jewel, api):
 
 
 @pytest.mark.django_db
-def test_login_removes_membership_jewel_dropped(world, jewel, api):
-    """J7: Jewel no longer has alice in t1, her login removes the membership from old and new RBAC
-
-    The removal is local, AWX does not push an unassign back to Jewel.
-    """
+@DELIVERY
+def test_jewel_removes_membership(world, jewel, api, delivered):
+    """J7: Jewel takes alice out of t1. The push removes the membership from old and new RBAC, and if it was lost her next login does."""
     alice_id = _alice(jewel)
-    t1 = jewel.find("shared.team", name="t1")
-    jewel.assignments.discard(AssignmentTuple(alice_id, t1, "Team Member", "user"))
+    with jewel.pushing(delivered):
+        jewel.unassign("Team Member", alice_id, jewel.find("shared.team", name="t1"))
+    after_push = _is_team_member(world.alice, world.team)
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    response = _me(api, jewel, alice_id)
 
+    assert after_push is not delivered
     assert response.status_code == 200, response.content
-    assert _claims_fetches(jewel) == [("GET", 200)]
+    assert _claims_fetches(jewel) == ([] if delivered else [("GET", 200)])
     assert not _is_team_member(world.alice, world.team)
     assert not world.team.member_role.members.filter(pk=world.alice.pk).exists()
     assert not [c for c in jewel.calls if c.method != "GET"]
@@ -168,15 +184,16 @@ FETCH_FAILURES = {
 @pytest.mark.django_db
 @pytest.mark.parametrize("failure", FETCH_FAILURES.values(), ids=FETCH_FAILURES.keys())
 def test_login_fails_when_claims_fetch_fails(world, jewel, api, failure):
-    """J8: alice's claims changed in Jewel and the jwt_claims fetch fails
+    """J8: Jewel took alice out of t1 but the push was lost, and the jwt_claims fetch at her login fails
 
     DAB answers 401 and leaves her assignments as they were.
     """
     alice_id = _alice(jewel)
-    jewel.assignments.discard(AssignmentTuple(alice_id, jewel.find("shared.team", name="t1"), "Team Member", "user"))
+    with jewel.pushes_lost():
+        jewel.unassign("Team Member", alice_id, jewel.find("shared.team", name="t1"))
     jewel.fail("GET", "*/jwt_claims/*", **failure)
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    response = _me(api, jewel, alice_id)
 
     assert response.status_code == 401, response.content
     assert _claims_fetches(jewel) == [("GET", failure.get("status"))]
@@ -187,12 +204,16 @@ def test_login_fails_when_claims_fetch_fails(world, jewel, api, failure):
 @pytest.mark.django_db
 @pytest.mark.parametrize("username, status", [("alice", 401), ("admin", 200)])
 def test_login_while_jewel_is_locked(world, jewel, api, username, status):
-    """J8: the jwt_claims fetch gets a 423 (Jewel is migrating), DAB lets superusers in and refuses everyone else"""
+    """J8: Jewel made the user a Team Admin but the push was lost, and the jwt_claims fetch gets a 423 (Jewel is migrating)
+
+    DAB lets superusers in and refuses everyone else, and applies no claims.
+    """
     user_id = jewel.find("shared.user", username=username)
-    jewel.assignments.add(AssignmentTuple(user_id, jewel.find("shared.team", name="t1"), "Team Admin", "user"))
+    with jewel.pushes_lost():
+        jewel.assign("Team Admin", user_id, jewel.find("shared.team", name="t1"))
     jewel.fail("GET", "*/jwt_claims/*", status=423, body={"detail": "Locked"})
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(user_id))
+    response = _me(api, jewel, user_id)
 
     assert response.status_code == status, response.content
     assert _claims_fetches(jewel) == [("GET", 423)]
@@ -200,22 +221,31 @@ def test_login_while_jewel_is_locked(world, jewel, api, username, status):
 
 
 @pytest.mark.django_db
-def test_login_follows_superuser_flag(world, jewel, api):
-    """J9: Jewel makes alice a superuser and later takes it back, each login sets is_superuser to match"""
-    alice_id = _alice(jewel)
-    inventory_url = f"/api/v2/inventories/{world.inventory.pk}/"
+@DELIVERY
+def test_superuser_flag_from_jewel(world, jewel, api, delivered):
+    """J9: Jewel makes alice a superuser and later takes it back
 
-    jewel.resources[alice_id].resource_data["is_superuser"] = True
-    me = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    The push sets is_superuser each time, and if it was lost her next login does. Her access to
+    inv1 follows.
+    """
+    alice_id = _alice(jewel)
+    inventory_url = f"/api/controller/v2/inventories/{world.inventory.pk}/"
+
+    with jewel.pushing(delivered):
+        jewel.update(alice_id, is_superuser=True)
+    pushed_on = User.objects.get(pk=world.alice.pk).is_superuser
+    me = _me(api, jewel, alice_id)
     as_superuser = api.get(inventory_url, **jewel.jwt_headers(alice_id))
+    assert pushed_on is delivered
     assert me.status_code == 200, me.content
     assert me.json()["results"][0]["is_superuser"] is True
-    assert User.objects.get(pk=world.alice.pk).is_superuser
     assert as_superuser.status_code == 200
 
-    jewel.resources[alice_id].resource_data["is_superuser"] = False
-    me = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    with jewel.pushing(delivered):
+        jewel.update(alice_id, is_superuser=False)
+    pushed_off = User.objects.get(pk=world.alice.pk).is_superuser
+    me = _me(api, jewel, alice_id)
     as_regular = api.get(inventory_url, **jewel.jwt_headers(alice_id))
+    assert pushed_off is not delivered
     assert me.json()["results"][0]["is_superuser"] is False
-    assert not User.objects.get(pk=world.alice.pk).is_superuser
     assert as_regular.status_code in (403, 404)

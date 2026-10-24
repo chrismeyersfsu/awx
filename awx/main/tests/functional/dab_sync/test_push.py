@@ -41,15 +41,15 @@ def _teams():
 
 
 def _create(api, world, headers):
-    return api.post("/api/v2/teams/", {"name": "t9", "organization": world.org.pk}, content_type="application/json", **headers)
+    return api.post("/api/controller/v2/teams/", {"name": "t9", "organization": world.org.pk}, content_type="application/json", **headers)
 
 
 def _update(api, world, headers):
-    return api.patch(f"/api/v2/teams/{world.team.pk}/", {"description": "changed in AWX"}, content_type="application/json", **headers)
+    return api.patch(f"/api/controller/v2/teams/{world.team.pk}/", {"description": "changed in AWX"}, content_type="application/json", **headers)
 
 
 def _delete(api, world, headers):
-    return api.delete(f"/api/v2/teams/{world.team.pk}/", **headers)
+    return api.delete(f"/api/controller/v2/teams/{world.team.pk}/", **headers)
 
 
 @pytest.mark.django_db
@@ -131,19 +131,20 @@ def test_delete_team_awx_marked_local(world, jewel, api):
 @pytest.mark.django_db
 @pytest.mark.parametrize("action", ["create", "rename"])
 def test_team_name_jewel_already_has(world, jewel, api, action):
-    """W5: Jewel has team t2 in o1 and AWX does not, AWX creates t2 or renames t1 to t2
+    """W5: Jewel created team t2 in o1 but the push never reached AWX, then AWX creates t2 or renames t1 to t2
 
     The fake answers the natural key clash with a 400 (not verified against Jewel), so AWX
     rejects the change and both sides keep one t2.
     """
     headers = _admin(jewel)
-    t2 = jewel.add("shared.team", name="t2", organization=jewel.find("shared.organization", name="o1"), description="")
+    with jewel.pushes_lost():
+        t2 = jewel.create("shared.team", name="t2", organization=jewel.find("shared.organization", name="o1"), description="")
     before = _teams()
 
     if action == "create":
-        response = api.post("/api/v2/teams/", {"name": "t2", "organization": world.org.pk}, content_type="application/json", **headers)
+        response = api.post("/api/controller/v2/teams/", {"name": "t2", "organization": world.org.pk}, content_type="application/json", **headers)
     else:
-        response = api.patch(f"/api/v2/teams/{world.team.pk}/", {"name": "t2"}, content_type="application/json", **headers)
+        response = api.patch(f"/api/controller/v2/teams/{world.team.pk}/", {"name": "t2"}, content_type="application/json", **headers)
 
     assert response.status_code == 400, response.content
     assert response.json() == SYNC_FAILED
@@ -170,14 +171,15 @@ def test_delete_team_with_corrupted_ansible_id(world, jewel, api):
 
 @pytest.mark.django_db
 def test_delete_team_holding_another_teams_ansible_id(world, jewel, api, pull):
-    """W6: AWX's t1 carries the ansible_id of t2, a team only Jewel has, and AWX deletes t1
+    """W6: AWX's t1 carries the ansible_id of t2, a team whose create push never reached AWX, and AWX deletes t1
 
     AWX pushes the delete with t2's ansible_id, so Jewel deletes t2 and keeps t1. The next pull
     brings t1 back as a new team with its roles from Jewel.
     """
     headers = _admin(jewel)
     t1 = jewel.find("shared.team", name="t1")
-    t2 = jewel.add("shared.team", name="t2", organization=jewel.find("shared.organization", name="o1"), description="")
+    with jewel.pushes_lost():
+        t2 = jewel.create("shared.team", name="t2", organization=jewel.find("shared.organization", name="o1"), description="")
     give_ansible_id(world.team, t2)
 
     response = _delete(api, world, headers)

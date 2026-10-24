@@ -6,6 +6,9 @@ It replaces the HTTP call inside DAB's resource server client
 runs for real: service token signing, raise_if_bad_request, the pull, the reverse sync,
 assignment pushes and the jwt_claims fetch on a claims hash mismatch.
 
+Changes made in Jewel (create, update, delete, assign, unassign) are pushed to AWX's
+/service-index/ endpoints through AWX's real request stack, the way Jewel pushes them.
+
 Responses mirror what Jewel devel returns (its Python package is still aap_gateway_api).
 Jewel serves the service index with DAB's own resource_registry and rbac.service_api views,
 and builds claims with DAB's claims functions, so the shapes and error messages here are
@@ -20,6 +23,7 @@ import io
 import json
 import re
 import uuid
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from urllib.parse import urlencode, urlparse
@@ -40,6 +44,7 @@ from ansible_base.resource_registry.models import Resource, service_id
 JEWEL_URL = "https://jewel.fake.test"
 SERVICE_INDEX_PATH = "/api/gateway/v1/service-index/"
 JEWEL_API_PATH = "/api/gateway/v1/"
+AWX_SERVICE_INDEX_PATH = "/api/controller/v2/service-index/"  # where Jewel reaches AWX's resource and assignment endpoints
 
 # Objects the fake holds and compares with AWX's. It also holds role definitions, those Jewel
 # defines (see adopt) and those AWX pushes. Other types (feature flags) get a 404 manifest, which
@@ -53,6 +58,12 @@ NATURAL_KEYS = {
     ROLE_DEFINITION: ("name",),
 }
 OBJECT_TYPES = {"shared.organization": "organization", "shared.team": "team"}
+# Fields Jewel's serializers fill in when a create leaves them out
+RESOURCE_DEFAULTS = {
+    "shared.organization": {"description": ""},
+    "shared.team": {"description": ""},
+    "shared.user": {"email": "", "first_name": "", "last_name": "", "is_superuser": False},
+}
 
 
 @dataclass
@@ -79,6 +90,24 @@ class Call:
 
 
 @dataclass
+class Push:
+    method: str
+    path: str
+    data: dict | None
+    status: int | None = None
+    body: dict | str | None = None
+    lost: bool = False
+
+
+class JewelRefused(Exception):
+    """Jewel refused a change made in it, with this body and status"""
+
+    def __init__(self, body, status=400):
+        super().__init__(f"{status} {body}")
+        self.body, self.status = body, status
+
+
+@dataclass
 class Failure:
     method: str
     path_glob: str
@@ -101,6 +130,9 @@ class FakeJewel:
     calls: list[Call] = field(default_factory=list)
     unhandled: list[Call] = field(default_factory=list)
     failures: list[Failure] = field(default_factory=list)
+    pushes: list[Push] = field(default_factory=list)
+    awx: object = None  # django.test.Client the pushes go through, set by the jewel fixture
+    _losing_pushes: bool = False
 
     def __post_init__(self):
         self._private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -155,31 +187,140 @@ class FakeJewel:
             raise LookupError(f"expected one {resource_type} matching {natural_key}, found {len(matches)}")
         return matches[0]
 
-    def add(self, resource_type, **resource_data):
-        """Create a resource only Jewel has, returning its ansible_id"""
+    # ---- Jewel's own API: changes made in Jewel, pushed to AWX ----
+    #
+    # Jewel pushes every change to an org, team, user, role definition or assignment to each
+    # service (aap_gateway_api.views.api.v1.common.ResourceAPIUpdateMixin and role.AssignmentSyncMixin)
+    # in the background, as the user who made it with resource_api_actions "*". It only logs a
+    # failed push and relies on each service's periodic pull to catch up.
+
+    def create(self, resource_type, by=None, **resource_data):
+        """Create a resource in Jewel and push it, returning its ansible_id"""
+        resource_data = {**RESOURCE_DEFAULTS.get(resource_type, {}), **resource_data}
         ansible_id = str(uuid.uuid4())
+        self._refuse_duplicate(ansible_id, FakeResource(resource_type, self.service_id, resource_data))
         self.resources[ansible_id] = FakeResource(resource_type, self.service_id, resource_data)
+        if resource_type == ROLE_DEFINITION:
+            self.role_definitions.add(resource_data["name"])
+        self._push(
+            "POST", "resources/", by, {"ansible_id": ansible_id, "service_id": self.service_id, "resource_type": resource_type, "resource_data": resource_data}
+        )
         return ansible_id
 
-    def rename_role_definition(self, name, new_name):
-        """Rename a role definition in Jewel, its assignments go with it"""
-        self.resources[self.find(ROLE_DEFINITION, name=name)].resource_data["name"] = new_name
-        self.role_definitions = (self.role_definitions - {name}) | {new_name}
-        self.assignments = {replace(a, role_definition_name=new_name) if a.role_definition_name == name else a for a in self.assignments}
+    def update(self, ansible_id, by=None, **changes):
+        """Change a resource in Jewel and push its new data"""
+        resource = self.resources[ansible_id]
+        self._refuse_managed(resource)
+        self._refuse_duplicate(ansible_id, FakeResource(resource.resource_type, resource.service_id, {**resource.resource_data, **changes}))
+        if resource.resource_type == ROLE_DEFINITION and "name" in changes:
+            old, new = resource.resource_data["name"], changes["name"]
+            self.role_definitions = (self.role_definitions - {old}) | {new}
+            self.assignments = {replace(a, role_definition_name=new) if a.role_definition_name == old else a for a in self.assignments}
+        resource.resource_data = {**resource.resource_data, **changes}
+        self._push("PUT", f"resources/{ansible_id}/", by, {"resource_data": resource.resource_data})
 
-    def delete_role_definition(self, name):
-        """Delete a role definition in Jewel, with its assignments"""
-        del self.resources[self.find(ROLE_DEFINITION, name=name)]
-        self.role_definitions.discard(name)
-        self.assignments = {a for a in self.assignments if a.role_definition_name != name}
+    def delete(self, ansible_id, by=None):
+        """Delete a resource in Jewel, with its assignments, and push the delete
 
-    def replace_user(self, ansible_id):
-        """Delete a user in Jewel and register a different person under the same username, returning the new ansible_id"""
-        old = self.resources.pop(ansible_id)
+        Deleting an org deletes its teams in Jewel too. Jewel pushes only the org's delete:
+        each service cascades on its own.
+        """
+        resource = self.resources[ansible_id]
+        self._refuse_managed(resource)
+        del self.resources[ansible_id]
+        if resource.resource_type == "shared.organization":
+            for team in [aid for aid, r in self.resources.items() if r.resource_type == "shared.team" and r.resource_data.get("organization") == ansible_id]:
+                del self.resources[team]
+                self.assignments = {a for a in self.assignments if team not in (a.actor_ansible_id, a.ansible_id_or_pk)}
+        if resource.resource_type == ROLE_DEFINITION:
+            name = resource.resource_data["name"]
+            self.role_definitions.discard(name)
+            self.assignments = {a for a in self.assignments if a.role_definition_name != name}
         self.assignments = {a for a in self.assignments if ansible_id not in (a.actor_ansible_id, a.ansible_id_or_pk)}
-        new_id = str(uuid.uuid4())
-        self.resources[new_id] = FakeResource("shared.user", self.service_id, dict(old.resource_data, first_name="Someone", last_name="Else"))
-        return new_id
+        self._push("DELETE", f"resources/{ansible_id}/", by)
+
+    def assign(self, role, actor, obj, assignment_type="user", by=None):
+        """Give a user or team (by ansible_id) a role in Jewel and push it
+
+        obj is the ansible_id of an org or team, or an AWX object. A role on an AWX object belongs
+        to AWX, so Jewel sends it to AWX first and fails, with AWX's answer, if AWX rejects it.
+        """
+        self._change_assignment("assign", role, actor, obj, assignment_type, by)
+
+    def unassign(self, role, actor, obj, assignment_type="user", by=None):
+        """Take a role away in Jewel and push it, the same way as assign"""
+        self._change_assignment("unassign", role, actor, obj, assignment_type, by)
+
+    def pushing(self, delivered):
+        """A context where Jewel's pushes are delivered, or lost (see pushes_lost)"""
+        return nullcontext() if delivered else self.pushes_lost()
+
+    @contextmanager
+    def pushes_lost(self):
+        """Jewel's pushes inside never reach AWX, as when AWX is down or the push times out"""
+        self._losing_pushes = True
+        try:
+            yield
+        finally:
+            self._losing_pushes = False
+
+    def replace_user(self, ansible_id, by=None):
+        """Delete a user in Jewel and register a different person under the same username, returning the new ansible_id"""
+        old = self.resources[ansible_id]
+        self.delete(ansible_id, by=by)
+        return self.create("shared.user", by=by, **dict(old.resource_data, first_name="Someone", last_name="Else"))
+
+    def _refuse_duplicate(self, ansible_id, resource):
+        if self._natural_key_clash(ansible_id, resource):
+            raise JewelRefused({"detail": f"{resource.resource_type} {resource.natural_key()} already exists"})
+
+    def _refuse_managed(self, resource):
+        if resource.resource_type == ROLE_DEFINITION and resource.resource_data.get("managed"):
+            raise JewelRefused({"detail": "Role is managed by the system"})
+
+    def _change_assignment(self, action, role, actor, obj, assignment_type, by):
+        shared = isinstance(obj, str)
+        body = {"role_definition": role, f"{assignment_type}_ansible_id": actor, "from_service": self.service_id}
+        body["object_ansible_id" if shared else "object_id"] = obj if shared else str(obj.pk)
+        assignment = AssignmentTuple(actor, obj if shared else str(obj.pk), role, assignment_type)
+        if shared:
+            self._set_assignment(action, assignment)
+            self._push("POST", f"role-{assignment_type}-assignments/{action}/", by, body)
+            return
+        push = self._push("POST", f"role-{assignment_type}-assignments/{action}/", by, body)
+        if push.lost or not 200 <= push.status < 300:
+            raise JewelRefused(push.body, push.status)
+        self._set_assignment(action, assignment)
+
+    def _set_assignment(self, action, assignment):
+        if action == "assign":
+            self.assignments.add(assignment)
+        else:
+            self.assignments.discard(assignment)
+
+    def _push(self, method, path, by, data=None):
+        push = Push(method, path, data)
+        self.pushes.append(push)
+        if self._losing_pushes:
+            push.lost = True
+            return push
+        by = by or self._default_user()
+        send = getattr(self.awx, method.lower())
+        response = send(
+            AWX_SERVICE_INDEX_PATH + path,
+            data=json.dumps(data) if data is not None else None,
+            content_type="application/json",
+            **self.jwt_headers(by, resource_api_actions="*"),
+        )
+        push.status = response.status_code
+        try:
+            push.body = json.loads(response.content) if response.content else None
+        except ValueError:
+            push.body = response.content.decode()[:500]
+        return push
+
+    def _default_user(self):
+        return next(aid for aid, r in self.resources.items() if r.resource_type == "shared.user" and r.resource_data.get("is_superuser"))
 
     def fail(self, method, path_glob, status=None, body=None, exc=None, times=None, headers=None):
         """Answer matching requests with a status, body and headers instead of the route, or raise exc (like requests.ConnectionError)"""

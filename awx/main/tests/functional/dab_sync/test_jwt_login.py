@@ -17,7 +17,7 @@ from .invariants import AwxOnlySnapshot, old_rbac_mismatches
 @pytest.mark.django_db
 def test_login_in_sync(world, jewel, api):
     """Baseline for the fake: a clean login works and leaves roles alone"""
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(jewel.find("shared.user", username="alice")))
+    response = api.get("/api/controller/v2/me/", **jewel.jwt_headers(jewel.find("shared.user", username="alice")))
 
     assert response.status_code == 200, response.content
     assert response.json()["results"][0]["id"] == world.alice.pk
@@ -35,7 +35,7 @@ def test_login_repairs_user_with_corrupted_ansible_id(world, jewel, api):
     alice_id = jewel.find("shared.user", username="alice")
     snapshot = AwxOnlySnapshot.take()
 
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice_id))
+    response = api.get("/api/controller/v2/me/", **jewel.jwt_headers(alice_id))
 
     assert response.status_code == 200, response.content
     assert response.json()["results"][0]["id"] == world.alice.pk
@@ -48,16 +48,37 @@ def test_login_repairs_user_with_corrupted_ansible_id(world, jewel, api):
 
 
 @pytest.mark.django_db
-def test_reused_username_takes_over_previous_user(world, jewel, api):
+def test_reused_username_gets_a_new_user(world, jewel, api):
     """J4: bob is deleted in Jewel and a different person signs up as bob
 
-    The same username fallback as J1 hands the new person old bob's AWX user, including the
-    AWX-only Inventory Use role on inv1.
+    Jewel pushes the delete, which deletes AWX's bob with his roles, then pushes the new bob,
+    which AWX creates as a new user. The new person has none of old bob's access.
     """
     new_bob = jewel.replace_user(jewel.find("shared.user", username="bob"))
 
-    me = api.get("/api/v2/me/", **jewel.jwt_headers(new_bob))
-    inventory = api.get(f"/api/v2/inventories/{world.inventory.pk}/", **jewel.jwt_headers(new_bob))
+    me = api.get("/api/controller/v2/me/", **jewel.jwt_headers(new_bob))
+    inventory = api.get(f"/api/controller/v2/inventories/{world.inventory.pk}/", **jewel.jwt_headers(new_bob))
+
+    assert [(p.method, p.status) for p in jewel.pushes] == [("DELETE", 204), ("POST", 201)]
+    assert me.status_code == 200, me.content
+    assert not User.objects.filter(pk=world.bob.pk).exists()
+    assert me.json()["results"][0]["id"] != world.bob.pk
+    assert inventory.status_code in (403, 404)
+    assert not RoleUserAssignment.objects.filter(role_definition__name="Inventory Use", object_id=world.inventory.pk).exists()
+
+
+@pytest.mark.django_db
+def test_reused_username_takes_over_previous_user_when_pushes_are_lost(world, jewel, api):
+    """J4: the same, but Jewel's pushes of the delete and of the new bob never reach AWX
+
+    On login the new person's ansible_id is unknown, creating the user clashes on username, and
+    DAB's fallback hands them old bob's AWX user, including the AWX-only Inventory Use role on inv1.
+    """
+    with jewel.pushes_lost():
+        new_bob = jewel.replace_user(jewel.find("shared.user", username="bob"))
+
+    me = api.get("/api/controller/v2/me/", **jewel.jwt_headers(new_bob))
+    inventory = api.get(f"/api/controller/v2/inventories/{world.inventory.pk}/", **jewel.jwt_headers(new_bob))
 
     assert me.status_code == 200, me.content
     assert me.json()["results"][0]["id"] == world.bob.pk

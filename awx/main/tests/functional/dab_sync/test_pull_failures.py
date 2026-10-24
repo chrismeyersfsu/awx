@@ -13,7 +13,6 @@ import pytest
 import requests
 
 from ansible_base.rbac.models import RoleDefinition, RoleTeamAssignment, RoleUserAssignment
-from ansible_base.rbac.role_sync_utils import AssignmentTuple
 from ansible_base.resource_registry.signals.handlers import no_reverse_sync
 from ansible_base.resource_registry.tasks.sync import ResourceSyncHTTPError
 
@@ -37,8 +36,9 @@ def _manifest_csv(jewel, *ansible_ids):
     return "ansible_id,resource_hash\n" + "".join(f"{aid},{jewel.resources[aid].resource_hash()}\n" for aid in ansible_ids)
 
 
-def _drop_alice_from_t1(jewel):
-    jewel.assignments.discard(AssignmentTuple(jewel.find("shared.user", username="alice"), jewel.find("shared.team", name="t1"), "Team Member", "user"))
+def _drop_alice_from_t1_push_lost(jewel):
+    with jewel.pushes_lost():
+        jewel.unassign("Team Member", jewel.find("shared.user", username="alice"), jewel.find("shared.team", name="t1"))
 
 
 @pytest.mark.django_db
@@ -128,13 +128,13 @@ def test_pull_with_unusable_manifest_and_corrupted_team(world, jewel, pull, mani
     ids=["metadata_500", "metadata_unreachable", "team_manifest_500"],
 )
 def test_pull_stops_when_jewel_fails(world, jewel, pull, path_glob, failure, raised):
-    """P7: Jewel dropped alice from t1, and a request the pull needs for every type fails
+    """P7: Jewel dropped alice from t1 and the push was lost, and a request the pull needs for every type fails
 
     The pull raises on the first failure and never reaches the assignment sync, so alice stays a
     member until a pull gets through. Types handled before the failure are already synced (teams
     come last, after users and orgs).
     """
-    _drop_alice_from_t1(jewel)
+    _drop_alice_from_t1_push_lost(jewel)
     jewel.fail("GET", path_glob, **failure)
 
     with pytest.raises(raised):
@@ -183,7 +183,7 @@ def test_pull_fails_fetching_team_after_deleting_it(world, jewel, pull, failure)
 
 @pytest.mark.django_db
 def test_pull_removes_job_template_assignment_jewel_does_not_have(world, jewel, pull):
-    """P8: bob has JobTemplate Admin on jt1 only in AWX, the pull removes it
+    """P8: bob has JobTemplate Admin on jt1, made inside AWX without a push, and the pull removes it
 
     AWX's pull compares all of AWX's assignments with Jewel's, not only those on shared objects,
     so a role on an AWX-only object that never reached Jewel is removed like P9.

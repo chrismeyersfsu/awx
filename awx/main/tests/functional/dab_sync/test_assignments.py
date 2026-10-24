@@ -15,7 +15,7 @@ from .invariants import old_rbac_mismatches, sync_differences
 def _new_api(api, world, headers):
     rd = RoleDefinition.objects.get(name="Team Member")
     return api.post(
-        "/api/v2/role_user_assignments/",
+        "/api/controller/v2/role_user_assignments/",
         {"role_definition": rd.pk, "user": world.bob.pk, "object_id": world.team.pk},
         content_type="application/json",
         **headers,
@@ -23,7 +23,7 @@ def _new_api(api, world, headers):
 
 
 def _old_api(api, world, headers):
-    return api.post(f"/api/v2/teams/{world.team.pk}/users/", {"id": world.bob.pk}, content_type="application/json", **headers)
+    return api.post(f"/api/controller/v2/teams/{world.team.pk}/users/", {"id": world.bob.pk}, content_type="application/json", **headers)
 
 
 @pytest.mark.django_db

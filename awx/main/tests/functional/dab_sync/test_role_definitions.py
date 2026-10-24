@@ -1,112 +1,111 @@
 """
-How AWX follows today when Jewel renames or deletes a role definition, and what happens to the Compat role definitions AWX makes.
+How AWX follows today when Jewel creates, renames or deletes a role definition, and what happens to the Compat role definitions AWX makes.
 
 These tests record current behavior, they do not judge it.
 
-The pull syncs role definitions like other shared resources. AWX's bridge to its old RBAC
-(ROLE_DEFINITION_TO_ROLE_FIELD) and the JWT managed roles (ANSIBLE_BASE_JWT_MANAGED_ROLES) both go
-by role definition name.
+Role definitions are shared resources: Jewel pushes its changes to them, and the pull syncs
+them like orgs and teams. Managed role definitions (Team Member, Organization Admin, ...) cannot
+be renamed or deleted, so these use a custom one.
 """
 
 import pytest
 
 from ansible_base.rbac.models import RoleDefinition, RoleUserAssignment
-from ansible_base.rbac.role_sync_utils import AssignmentTuple
 
 from .fake_jewel import ROLE_DEFINITION
-from .invariants import old_rbac_mismatches, sync_differences
+from .invariants import sync_differences
+
+DELIVERY = pytest.mark.parametrize("delivered", [True, False], ids=["pushed", "push_lost"])
+VIEWER = {"description": "", "managed": False, "permissions": ["awx.view_inventory", "shared.view_organization"], "content_type": "shared.organization"}
 
 
 def _has_role(user, role_name, obj):
     return RoleUserAssignment.objects.filter(user=user, role_definition__name=role_name, object_id=obj.pk).exists()
 
 
-def _rename_team_member(jewel):
-    jewel.rename_role_definition("Team Member", "Team Participant")
-    return jewel.find("shared.team", name="t1")
+def _viewer_for_alice(jewel, world):
+    """Jewel creates the custom org role "Inventory Viewer" and gives it to alice on o1"""
+    rd = jewel.create(ROLE_DEFINITION, name="Inventory Viewer", **VIEWER)
+    jewel.assign("Inventory Viewer", jewel.find("shared.user", username="alice"), str(world.org.resource.ansible_id))
+    return rd
+
+
+def _alice_sees_inv1(api, jewel, world):
+    return api.get(f"/api/controller/v2/inventories/{world.inventory.pk}/", **jewel.jwt_headers(jewel.find("shared.user", username="alice"))).status_code
 
 
 @pytest.mark.django_db
-def test_pull_renames_role_definition(world, jewel, pull):
-    """P10: Jewel renames Team Member to Team Participant and adds bob to t1 under the new name
+@DELIVERY
+def test_jewel_creates_custom_role_definition(world, jewel, api, pull, delivered):
+    """P10: Jewel creates a custom org role and gives it to alice on o1
 
-    The pull renames AWX's role definition, so alice keeps her assignment and her old member_role
-    membership. Bob gets the assignment but not the old member_role membership: the bridge to old
-    RBAC knows the role only as Team Member, so /api/v2/teams/N/users/ does not list him.
+    Pushed, AWX creates the role definition, owned by Jewel, and the assignment, and alice can
+    see o1's inventory. With the pushes lost, the pull creates both.
     """
-    t1 = _rename_team_member(jewel)
-    jewel.assignments.add(AssignmentTuple(jewel.find("shared.user", username="bob"), t1, "Team Participant", "user"))
+    with jewel.pushing(delivered):
+        rd = _viewer_for_alice(jewel, world)
+    assert RoleDefinition.objects.filter(name="Inventory Viewer").exists() is delivered
 
     pull()
 
-    assert not RoleDefinition.objects.filter(name="Team Member").exists()
-    assert _has_role(world.alice, "Team Participant", world.team)
-    assert _has_role(world.bob, "Team Participant", world.team)
-    assert set(world.team.member_role.members.values_list("username", flat=True)) == {"alice"}
+    assert str(RoleDefinition.objects.get(name="Inventory Viewer").resource.ansible_id) == rd
+    assert str(RoleDefinition.objects.get(name="Inventory Viewer").resource.service_id) == jewel.service_id
+    assert _has_role(world.alice, "Inventory Viewer", world.org)
+    assert _alice_sees_inv1(api, jewel, world) == 200
     assert sync_differences(jewel) == []
 
 
 @pytest.mark.django_db
-def test_login_ignores_renamed_role_definition(world, jewel, pull, api):
-    """P10: after the rename, Jewel drops alice from t1 and she logs in
-
-    Team Participant is not a JWT managed role, so neither her claims nor AWX's include it. The
-    hashes match, AWX does not fetch claims, and alice stays a member until the next pull.
-    """
-    t1 = _rename_team_member(jewel)
-    pull()
-    alice = jewel.find("shared.user", username="alice")
-    jewel.assignments.discard(AssignmentTuple(alice, t1, "Team Participant", "user"))
-
-    response = api.get("/api/v2/me/", **jewel.jwt_headers(alice))
-
-    assert response.status_code == 200, response.content
-    assert not [c for c in jewel.calls if "/jwt_claims/" in c.path]
-    assert _has_role(world.alice, "Team Participant", world.team)
-
-    pull()
-    assert not _has_role(world.alice, "Team Participant", world.team)
-
-
-@pytest.mark.django_db
-def test_pull_deletes_role_definition_jewel_deleted(world, jewel, pull):
-    """P10: bob is a Team Admin of t1 and Jewel deletes the Team Admin role definition
-
-    The pull deletes AWX's role definition with its assignments, and bob leaves the old admin_role too.
-    """
-    RoleDefinition.objects.get(name="Team Admin").give_permission(world.bob, world.team)
-    assert world.team.admin_role.members.filter(pk=world.bob.pk).exists()
-    jewel.delete_role_definition("Team Admin")
+@DELIVERY
+def test_jewel_renames_custom_role_definition(world, jewel, pull, delivered):
+    """P10: Jewel renames the custom role, AWX renames its role definition and alice keeps the assignment, by push or else by the pull"""
+    rd = _viewer_for_alice(jewel, world)
+    with jewel.pushing(delivered):
+        jewel.update(rd, name="Org Inventory Viewer")
+    assert RoleDefinition.objects.filter(name="Org Inventory Viewer").exists() is delivered
 
     pull()
 
-    assert not RoleDefinition.objects.filter(name="Team Admin").exists()
-    assert not RoleUserAssignment.objects.filter(user=world.bob, content_type__model="team", object_id=world.team.pk).exists()
-    assert not world.team.admin_role.members.filter(pk=world.bob.pk).exists()
-    assert old_rbac_mismatches() == []
+    assert not RoleDefinition.objects.filter(name="Inventory Viewer").exists()
+    assert _has_role(world.alice, "Org Inventory Viewer", world.org)
     assert sync_differences(jewel) == []
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("jewel_deletes", [False, True], ids=["kept_in_jewel", "deleted_in_jewel"])
-def test_compat_role_definition_through_pull(world, jewel, pull, jewel_deletes):
+@DELIVERY
+def test_jewel_deletes_custom_role_definition(world, jewel, api, pull, delivered):
+    """P10: Jewel deletes the custom role, AWX deletes its role definition with alice's assignment, by push or else by the pull"""
+    rd = _viewer_for_alice(jewel, world)
+    with jewel.pushing(delivered):
+        jewel.delete(rd)
+    assert RoleDefinition.objects.filter(name="Inventory Viewer").exists() is not delivered
+
+    pull()
+
+    assert not RoleDefinition.objects.filter(name="Inventory Viewer").exists()
+    assert not RoleUserAssignment.objects.filter(user=world.alice, content_type__model="organization").exists()
+    assert _alice_sees_inv1(api, jewel, world) in (403, 404)
+    assert sync_differences(jewel) == []
+
+
+@pytest.mark.django_db
+@DELIVERY
+def test_jewel_deletes_compat_role_definition(world, jewel, pull, delivered):
     """P10: adding bob to jt1's old read_role makes AWX create JobTemplate Read Compat, which has no managed equivalent
 
     AWX pushes the Compat role definition and the assignment to Jewel, which then owns the role
-    definition. A pull leaves it alone while Jewel has it. When Jewel deletes it, the pull
-    deletes it in AWX with bob's assignment, but bob stays a member of the old read_role.
+    definition. When Jewel deletes it, AWX deletes it with bob's assignment (by push, or else by
+    the pull), but bob stays a member of the old read_role.
     """
     world.jt.read_role.members.add(world.bob)
     compat = jewel.find(ROLE_DEFINITION, name="JobTemplate Read Compat")
     assert str(RoleDefinition.objects.get(name="JobTemplate Read Compat").resource.service_id) == jewel.service_id
-    assert AssignmentTuple(jewel.find("shared.user", username="bob"), str(world.jt.pk), "JobTemplate Read Compat", "user") in jewel.assignments
-    if jewel_deletes:
-        jewel.delete_role_definition("JobTemplate Read Compat")
+    with jewel.pushing(delivered):
+        jewel.delete(compat)
 
     pull()
 
-    assert RoleDefinition.objects.filter(name="JobTemplate Read Compat").exists() is not jewel_deletes
-    assert _has_role(world.bob, "JobTemplate Read Compat", world.jt) is not jewel_deletes
+    assert not RoleDefinition.objects.filter(name="JobTemplate Read Compat").exists()
+    assert not _has_role(world.bob, "JobTemplate Read Compat", world.jt)
     assert world.jt.read_role.members.filter(pk=world.bob.pk).exists()
-    assert (compat in jewel.resources) is not jewel_deletes
     assert sync_differences(jewel) == []

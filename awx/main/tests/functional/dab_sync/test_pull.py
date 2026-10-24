@@ -10,7 +10,6 @@ import pytest
 from ansible_base.rbac.models import RoleDefinition, RoleTeamAssignment, RoleUserAssignment
 from ansible_base.rbac.role_sync_utils import AssignmentTuple
 from ansible_base.resource_registry.models import service_id
-from ansible_base.resource_registry.signals.handlers import no_reverse_sync
 
 from awx.main.models import Credential, Inventory, Organization, Team, User
 from awx.main.models.rbac import ROLE_DEFINITION_TO_ROLE_FIELD
@@ -108,13 +107,13 @@ def test_pull_recreates_user_with_corrupted_ansible_id(world, jewel, pull, usern
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("role_name, target", [("Team Admin", "team"), ("Organization Member", "org")])
-def test_pull_removes_assignment_jewel_does_not_have(world, jewel, pull, role_name, target):
-    """P9: a role on a shared object that only AWX has is removed by the pull, from both old and new RBAC"""
+def test_pull_removes_assignment_whose_removal_push_was_lost(world, jewel, pull, role_name, target):
+    """P9: Jewel takes a role on a shared object away from alice and the push is lost, the pull removes it from old and new RBAC"""
     obj = getattr(world, target)
-    with no_reverse_sync():
-        RoleDefinition.objects.get(name=role_name).give_permission(world.alice, obj)
+    RoleDefinition.objects.get(name=role_name).give_permission(world.alice, obj)
+    with jewel.pushes_lost():
+        jewel.unassign(role_name, jewel.find("shared.user", username="alice"), str(obj.resource.ansible_id))
     assert _has_user_role(world.alice, role_name, obj)
-    assert not jewel.calls, "the assignment should exist only in AWX"
     snapshot = AwxOnlySnapshot.take()
 
     pull()
@@ -165,36 +164,45 @@ def test_pull_takes_back_changed_object_awx_marked_local(world, jewel, pull, tar
 
 
 OLD_RBAC_ROLES = [("Team Member", "team"), ("Team Admin", "team"), ("Organization Member", "org"), ("Organization Admin", "org")]
+DELIVERY = pytest.mark.parametrize("delivered", [True, False], ids=["pushed", "push_lost"])
 
 
 @pytest.mark.django_db
+@DELIVERY
 @pytest.mark.parametrize("role_name, target", OLD_RBAC_ROLES)
-def test_pull_adds_user_to_old_rbac_role(world, jewel, pull, role_name, target):
-    """P11: Jewel gives bob a role on o1 or t1, the pull grants it and adds bob to the matching old role
+def test_jewel_adds_user_to_old_rbac_role(world, jewel, pull, role_name, target, delivered):
+    """P11: Jewel gives bob a role on o1 or t1, and AWX grants it and adds bob to the matching old role
 
-    The pull's assignment writes skip the signals that bridge new and old RBAC, so this records
-    that the old role still follows.
+    Jewel's push grants it right away. If the push was lost, the pull does, although its
+    assignment writes skip the signals that bridge new and old RBAC.
     """
     obj = getattr(world, target)
-    jewel.assignments.add(AssignmentTuple(jewel.find("shared.user", username="bob"), str(obj.resource.ansible_id), role_name, "user"))
+    old_role = getattr(obj, ROLE_DEFINITION_TO_ROLE_FIELD[role_name])
+    with jewel.pushing(delivered):
+        jewel.assign(role_name, jewel.find("shared.user", username="bob"), str(obj.resource.ansible_id))
+    assert _has_user_role(world.bob, role_name, obj) is delivered
+    assert old_role.members.filter(pk=world.bob.pk).exists() is delivered
 
     pull()
 
     assert _has_user_role(world.bob, role_name, obj)
-    assert getattr(obj, ROLE_DEFINITION_TO_ROLE_FIELD[role_name]).members.filter(pk=world.bob.pk).exists()
+    assert old_role.members.filter(pk=world.bob.pk).exists()
     assert old_rbac_mismatches() == []
     assert sync_differences(jewel) == []
 
 
 @pytest.mark.django_db
+@DELIVERY
 @pytest.mark.parametrize("role_name, target", OLD_RBAC_ROLES)
-def test_pull_removes_user_from_old_rbac_role(world, jewel, pull, role_name, target):
-    """P11: Jewel takes a role on o1 or t1 away from alice, the pull removes it and takes alice out of the matching old role"""
+def test_jewel_removes_user_from_old_rbac_role(world, jewel, pull, role_name, target, delivered):
+    """P11: Jewel takes a role on o1 or t1 away from alice, and AWX removes it and takes alice out of the matching old role, by push or else by the pull"""
     obj = getattr(world, target)
     RoleDefinition.objects.get(name=role_name).give_permission(world.alice, obj)
     old_role = getattr(obj, ROLE_DEFINITION_TO_ROLE_FIELD[role_name])
     assert old_role.members.filter(pk=world.alice.pk).exists()
-    jewel.assignments.discard(AssignmentTuple(jewel.find("shared.user", username="alice"), str(obj.resource.ansible_id), role_name, "user"))
+    with jewel.pushing(delivered):
+        jewel.unassign(role_name, jewel.find("shared.user", username="alice"), str(obj.resource.ansible_id))
+    assert _has_user_role(world.alice, role_name, obj) is not delivered
 
     pull()
 
@@ -205,20 +213,22 @@ def test_pull_removes_user_from_old_rbac_role(world, jewel, pull, role_name, tar
 
 
 @pytest.mark.django_db
+@DELIVERY
 @pytest.mark.parametrize("jewel_adds", [True, False], ids=["added", "removed"])
-def test_pull_changes_team_role_on_org_in_old_rbac(world, jewel, pull, jewel_adds):
-    """P11: Jewel gives t1 Organization Inventory Admin on o1, or takes it away, and the pull follows in old RBAC
+def test_jewel_changes_team_role_on_org_in_old_rbac(world, jewel, pull, jewel_adds, delivered):
+    """P11: Jewel gives t1 Organization Inventory Admin on o1, or takes it away, and AWX follows in old RBAC, by push or else by the pull
 
     In old RBAC a team holds a role by its member_role being a parent of that role.
     """
     t1_member_role_is_parent = world.org.inventory_admin_role.parents.filter(pk=world.team.member_role.pk).exists
-    assignment = AssignmentTuple(str(world.team.resource.ansible_id), str(world.org.resource.ansible_id), "Organization Inventory Admin", "team")
-    if jewel_adds:
-        jewel.assignments.add(assignment)
-    else:
+    team_aid, org_aid = str(world.team.resource.ansible_id), str(world.org.resource.ansible_id)
+    if not jewel_adds:
         RoleDefinition.objects.get(name="Organization Inventory Admin").give_permission(world.team, world.org)
         assert t1_member_role_is_parent()
-        jewel.assignments.discard(assignment)
+    with jewel.pushing(delivered):
+        change = jewel.assign if jewel_adds else jewel.unassign
+        change("Organization Inventory Admin", team_aid, org_aid, assignment_type="team")
+    assert t1_member_role_is_parent() is (jewel_adds is delivered)
 
     pull()
 
@@ -231,16 +241,19 @@ def test_pull_changes_team_role_on_org_in_old_rbac(world, jewel, pull, jewel_add
 
 
 @pytest.mark.django_db
-def test_pull_does_not_apply_team_org_membership(world, jewel, pull):
-    """P11: Jewel makes t1 an Organization Member of o1, which AWX refuses for teams
+def test_jewel_makes_team_org_member(world, jewel, pull):
+    """P11: Jewel, which allows teams as org members, makes t1 an Organization Member of o1
 
-    The pull's create is rejected ("Assigning organization member permission to teams is not
-    allowed") and logged, the pull carries on, and the assignment stays only in Jewel.
+    AWX refuses teams in that role ("Assigning organization member permission to teams is not
+    allowed"): the push gets a 400, the pull's create is refused and logged, and the assignment
+    stays only in Jewel.
     """
-    assignment = AssignmentTuple(str(world.team.resource.ansible_id), str(world.org.resource.ansible_id), "Organization Member", "team")
-    jewel.assignments.add(assignment)
+    team_aid, org_aid = str(world.team.resource.ansible_id), str(world.org.resource.ansible_id)
+    jewel.assign("Organization Member", team_aid, org_aid, assignment_type="team")
+    push = jewel.pushes[-1]
 
     pull()
 
+    assert push.status == 400, push.body
     assert not RoleTeamAssignment.objects.filter(team=world.team, role_definition__name="Organization Member").exists()
-    assert sync_differences(jewel) == [f"assignment only in Jewel: {assignment}"]
+    assert sync_differences(jewel) == [f"assignment only in Jewel: {AssignmentTuple(team_aid, org_aid, 'Organization Member', 'team')}"]
